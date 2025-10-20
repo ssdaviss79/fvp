@@ -44,7 +44,7 @@ using namespace std;
     CFDictionarySetValue(attr, kCVPixelBufferMetalCompatibilityKey, kCFBooleanTrue);
     auto iosurface_props = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     CFDictionarySetValue(attr, kCVPixelBufferIOSurfacePropertiesKey, iosurface_props); // optional?
-    CVPixelCreate(nil, width, height, kCVPixelFormatType_32BGRA, attr, &pixbuf);
+    CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, attr, &pixbuf);  // FIXED: CVPixelBufferCreate
     CFRelease(attr);
     texCache = {};
 #if (USE_TEXCACHE + 0)
@@ -121,7 +121,7 @@ private:
 @interface FvpPlugin () {
     unordered_map<int64_t, shared_ptr<TexturePlayer>> players;
 }
-@property(readOnly, strong, nonatomic) NSObject<FlutterTextureRegistry>* texRegistry;
+@property(readonly, strong, nonatomic) NSObject<FlutterTextureRegistry>* texRegistry;  // FIXED: readonly (lowercase)
 @end
 
 @implementation FvpPlugin
