@@ -18,7 +18,7 @@ using namespace std;
 @interface MetalTexture : NSObject<FlutterTexture>
 @end
 @implementation MetalTexture {
-    @public
+@public
     id<MTLDevice> device;
     id<MTLCommandQueue> cmdQueue;
     id<MTLTexture> texture;
@@ -109,7 +109,7 @@ using namespace std;
         _displayLayer = [AVSampleBufferDisplayLayer layer];
         _displayLayer.videoGravity = AVLayerVideoGravityResizeAspect;
         _displayLayer.hidden = YES;
-        _displayLayer.frame = CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height));
+        _displayLayer.frame = CGRectMake(0, 0, (CGFloat)width, (CGFloat)height);
         NSLog(@"Created PiP layer for texture %lld", textureId);
     }
     return self;
@@ -143,7 +143,8 @@ public:
         [FvpPlugin registerPipLayer:pipLayer forTextureId:texId_];
 
         // Render callback with PiP bridge
-        setRenderCallback([this, texReg](void* opaque) {
+        __weak TexturePlayer* weakSelf = this;
+        setRenderCallback([this, texReg, weakSelf](void* opaque) {
             std::lock_guard<std::mutex> lock(mtex_->mtx);
             renderVideo();
 
@@ -156,9 +157,12 @@ public:
             });
 
             // Bridge to PiP (main thread, ULTRA-SIMPLE TIMING)
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self bridgeFrameToPipLayer];
-            });
+            TexturePlayer* strongSelf = weakSelf;
+            if (strongSelf) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [strongSelf bridgeFrameToPipLayer];
+                });
+            }
         });
     }
 
@@ -173,27 +177,25 @@ public:
 private:
     void bridgeFrameToPipLayer() {
         if (!pipLayer || !pipLayer.displayLayer) return;
-        
+
         CVPixelBufferRef pixbuf = mtex_->pixbuf;
         if (!pixbuf) return;
 
-        // ULTRA-SIMPLE TIMING: Invalid = continuous playback (works perfectly for PiP)
         CMSampleTimingInfo timing = {
             .presentationTimeStamp = kCMTimeInvalid,
             .duration = kCMTimeInvalid,
             .decodeTimeStamp = kCMTimeInvalid
         };
 
-        // Create sample buffer (NO FORMAT DESCRIPTION - iOS 14-17 compatible)
         CMSampleBufferRef sampleBuffer = nil;
         OSStatus status = CMSampleBufferCreateReadyWithImageBuffer(
-            kCFAllocatorDefault, 
-            pixbuf, 
-            nil,  // ← NO FORMAT DESC (iOS 14-17)
-            &timing, 
+            kCFAllocatorDefault,
+            pixbuf,
+            nil,
+            &timing,
             &sampleBuffer
         );
-        
+
         if (status == noErr && sampleBuffer) {
             [pipLayer.displayLayer enqueueSampleBuffer:sampleBuffer];
             CFRelease(sampleBuffer);
@@ -305,7 +307,7 @@ private:
             return;
         }
         int64_t textureId = [textureIdNum longLongValue];
-        
+
         PipDisplayLayer *pipLayer = [FvpPlugin pipLayerForTextureId:textureId];
         if (pipLayer) {
             result(@YES);
