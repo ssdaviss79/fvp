@@ -1,7 +1,10 @@
-#if __has_include(<Flutter/Flutter.h>)
 #import <Flutter/Flutter.h>
-#else
-#import <FlutterMacOS/FlutterMacOS.h>
-#endif
+#import <AVFoundation/AVFoundation.h>
+
 @interface FvpPlugin : NSObject<FlutterPlugin>
+
+// Picture-in-Picture layer registration
++ (void)registerPipLayer:(CALayer *)layer forTextureId:(int64_t)textureId;
++ (void)unregisterPipLayerForTextureId:(int64_t)textureId;
+
 @end
