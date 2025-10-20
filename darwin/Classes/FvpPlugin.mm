@@ -96,11 +96,10 @@ using namespace std;
 }
 @end
 
-// PiP Bridge: AVSampleBufferDisplayLayer for FFmpeg frames
+// PiP Bridge: AVSampleBufferDisplayLayer for FFmpeg frames (SIMPLIFIED)
 @interface PipDisplayLayer : NSObject
 @property (nonatomic, strong) AVSampleBufferDisplayLayer *displayLayer;
 @property (nonatomic, assign) int64_t textureId;
-@property (nonatomic, assign) CMVideoFormatDescriptionRef formatDesc;
 @end
 @implementation PipDisplayLayer
 - (instancetype)initWithTextureId:(int64_t)textureId width:(int)width height:(int)height {
@@ -110,24 +109,12 @@ using namespace std;
         _displayLayer = [AVSampleBufferDisplayLayer layer];
         _displayLayer.videoGravity = AVLayerVideoGravityResizeAspect;
         _displayLayer.hidden = YES;
-        _displayLayer.frame = CGRectZero;
-        
-        // Create format description for BGRA8
-        CMVideoDimensions dim = { (int32_t)width, (int32_t)height };
-        OSStatus status = CMVideoFormatDescriptionCreate(kCFAllocatorDefault,
-                                                         kCVPixelFormatType_32BGRA,
-                                                         dim.width, dim.height,
-                                                         nil, &_formatDesc);
-        if (status == noErr) {
-            _displayLayer.videoFormatDescription = (__bridge id _Nullable)(_formatDesc);
-        } else {
-            NSLog(@"Failed to create format description: %d", (int)status);
-        }
+        _displayLayer.frame = CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height));
+        NSLog(@"Created PiP layer for texture %lld", textureId);
     }
     return self;
 }
 - (void)dealloc {
-    if (_formatDesc) CFRelease(_formatDesc);
     if (_displayLayer.superlayer) {
         [_displayLayer removeFromSuperlayer];
     }
@@ -151,7 +138,7 @@ public:
         setRenderAPI(&ra);
         setVideoSurfaceSize(width, height);
 
-        // Create PiP layer
+        // Create PiP layer (SIMPLIFIED - no format description)
         pipLayer = [[PipDisplayLayer alloc] initWithTextureId:texId_ width:width height:height];
         [FvpPlugin registerPipLayer:pipLayer forTextureId:texId_];
 
@@ -168,7 +155,7 @@ public:
                 [registry textureFrameAvailable:tid];
             });
 
-            // Bridge to PiP (main thread, SIMPLIFIED TIMING)
+            // Bridge to PiP (main thread, ULTRA-SIMPLE TIMING)
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self bridgeFrameToPipLayer];
             });
@@ -190,24 +177,26 @@ private:
         CVPixelBufferRef pixbuf = mtex_->pixbuf;
         if (!pixbuf) return;
 
-        // SIMPLIFIED TIMING: Use invalid for continuous playback (works for PiP)
+        // ULTRA-SIMPLE TIMING: Invalid = continuous playback (works perfectly for PiP)
         CMSampleTimingInfo timing = {
-            .presentationTimeStamp = kCMTimeInvalid,  // Continuous
-            .duration = kCMTimeInvalid,               // No fixed duration
+            .presentationTimeStamp = kCMTimeInvalid,
+            .duration = kCMTimeInvalid,
             .decodeTimeStamp = kCMTimeInvalid
         };
 
-        // Create sample buffer
+        // Create sample buffer (NO FORMAT DESCRIPTION - iOS 14-17 compatible)
         CMSampleBufferRef sampleBuffer = nil;
         OSStatus status = CMSampleBufferCreateReadyWithImageBuffer(
-            kCFAllocatorDefault, pixbuf,
-            pipLayer.formatDesc, &timing, &sampleBuffer);
+            kCFAllocatorDefault, 
+            pixbuf, 
+            nil,  // ← NO FORMAT DESC (iOS 14-17)
+            &timing, 
+            &sampleBuffer
+        );
         
         if (status == noErr && sampleBuffer) {
             [pipLayer.displayLayer enqueueSampleBuffer:sampleBuffer];
             CFRelease(sampleBuffer);
-        } else {
-            NSLog(@"PiP Bridge: Failed to create sample buffer: %d", (int)status);
         }
     }
 
