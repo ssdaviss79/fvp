@@ -5,10 +5,11 @@
 #import "FvpPlugin.h"
 #include "mdk/RenderAPI.h"
 #include "mdk/Player.h"
+#include "mdk/Frame.h"  // Added for mdkFrameAPI
 #import <AVFoundation/AVFoundation.h>
-#import <AVKit/AVKit.h>  // For PiP
 #import <CoreVideo/CoreVideo.h>
 #import <Metal/Metal.h>
+#import <AVKit/AVKit.h>  // For PiP
 #include <mutex>
 #include <unordered_map>
 #include <iostream>
@@ -96,7 +97,7 @@ using namespace std;
 }
 @end
 
-// PiP Bridge: AVSampleBufferDisplayLayer for FFmpeg frames
+// NEW: AVSampleBufferDisplayLayer for PiP (hidden, frame-fed from FFmpeg)
 @interface PipDisplayLayer : NSObject
 @property (nonatomic, strong) AVSampleBufferDisplayLayer *displayLayer;
 @property (nonatomic, assign) int64_t textureId;
@@ -114,11 +115,15 @@ using namespace std;
         
         // Create format description for BGRA8
         CMVideoDimensions dim = { (int32_t)width, (int32_t)height };
-        CMVideoFormatDescriptionCreate(kCFAllocatorDefault,
-                                       kCVPixelFormatType_32BGRA,
-                                       dim.width, dim.height,
-                                       nil, &_formatDesc);
-        _displayLayer.videoFormatDescription = _formatDesc;
+        OSStatus status = CMVideoFormatDescriptionCreate(kCFAllocatorDefault,
+                                                         kCVPixelFormatType_32BGRA,
+                                                         dim.width, dim.height,
+                                                         nil, &_formatDesc);
+        if (status == noErr) {
+            _displayLayer.videoFormatDescription = _formatDesc;
+        } else {
+            NSLog(@"Failed to create format description: %d", (int)status);
+        }
     }
     return self;
 }
@@ -207,7 +212,7 @@ private:
             pipLayer.formatDesc, &timing, &sampleBuffer);
         
         if (status == noErr && sampleBuffer) {
-            // Enqueue on main thread (already dispatched)
+            // Enqueue
             [pipLayer.displayLayer enqueueSampleBuffer:sampleBuffer];
             CFRelease(sampleBuffer);
         } else {
@@ -313,8 +318,9 @@ private:
         }
 #endif
         result(nil);
-    } else if ([call.method isEqualToString:@"getPipLayerForTexture"]) {  // NEW: Expose for MyPipPlugin
-        NSNumber *textureIdNum = call.arguments[@"textureId"];
+    } else if ([call.method isEqualToString:@"getPipLayerForTexture"]) {
+        NSDictionary *args = call.arguments;
+        NSNumber *textureIdNum = args[@"textureId"];
         if (!textureIdNum) {
             result([FlutterError errorWithCode:@"INVALID_ARGS" message:@"Missing textureId" details:nil]);
             return;
