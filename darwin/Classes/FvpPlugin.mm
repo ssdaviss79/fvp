@@ -172,6 +172,9 @@ private:
     std::unordered_map<int64_t, std::shared_ptr<TexturePlayer>> players;
 }
 @property (readonly, strong, nonatomic) NSObject<FlutterTextureRegistry>* texRegistry;
+
+// NEW: Declare initWithRegistrar for PiP
+- (instancetype)initWithRegistrar:(NSObject<FlutterPluginRegistrar> *)registrar;
 @end
 
 @implementation FvpPlugin
@@ -191,4 +194,88 @@ private:
 #endif
     [registrar publish:instance];
     [registrar addMethodCallDelegate:instance channel:channel];
-    SetGlobalOption("MDK_KEY", "C03BFF5306AB39058A767105F82697F42A00FE970FB0E641D306DEFF3F220547E5E5377A3C504DC30D547890E71059BC023A4DD91
+    SetGlobalOption("MDK_KEY", "C03BFF5306AB39058A767105F82697F42A00FE970FB0E641D306DEFF3F220547E5E5377A3C504DC30D547890E71059BC023A4DD91A95474D1F33CA4C26C81B0FC73B00ACF954C6FA75898EFA07D9680B6A00FDF179C0A15381101D01124498AF55B069BD4B0156D5CF5A56DEDE782E5F3930AD47C8F40BFBA379231142E31B0F");
+}
+- (instancetype)initWithRegistrar:(NSObject<FlutterPluginRegistrar> *)registrar {
+    self = [super init];
+    if (self) {
+#if TARGET_OS_OSX
+        _texRegistry = registrar.textures;
+#else
+        _texRegistry = [registrar textures];
+#endif
+    }
+    return self;
+}
+- (void)handleMethodCall:(FlutterMethodCall*)call result:(FlutterResult)result {
+    if ([call.method isEqualToString:@"CreateRT"]) {
+        const auto handle = ((NSNumber*)call.arguments[@"player"]).longLongValue;
+        const auto width = ((NSNumber*)call.arguments[@"width"]).intValue;
+        const auto height = ((NSNumber*)call.arguments[@"height"]).intValue;
+        auto player = std::make_shared<TexturePlayer>(handle, width, height, _texRegistry);
+        players[player->textureId()] = player;
+        result(@(player->textureId()));
+    } else if ([call.method isEqualToString:@"ReleaseRT"]) {
+        const auto texId = ((NSNumber*)call.arguments[@"texture"]).longLongValue;
+        [_texRegistry unregisterTexture:texId];
+        players.erase(texId);
+        result(nil);
+    } else if ([call.method isEqualToString:@"MixWithOthers"]) {
+        [[maybe_unused]] const auto value = ((NSNumber*)call.arguments[@"value"]).boolValue;
+#if TARGET_OS_OSX
+#else
+        NSError *error = nil;
+        if (value) {
+            [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback withOptions:AVAudioSessionCategoryOptionMixWithOthers error:&error];
+        } else {
+            [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback error:&error];
+        }
+        if (error) {
+            NSLog(@"Audio session error: %@", error);
+        }
+#endif
+        result(nil);
+    } else if ([call.method isEqualToString:@"createPipLayer"]) {  // NEW: Expose AVSampleBufferDisplayLayer for PiP
+        NSDictionary *args = call.arguments;
+        NSNumber *textureIdNum = args[@"textureId"];
+        if (!textureIdNum) {
+            result([FlutterError errorWithCode:@"INVALID_ARGS" message:@"Missing textureId" details:nil]);
+            return;
+        }
+        int64_t textureId = [textureIdNum longLongValue];
+        
+        auto it = players.find(textureId);
+        if (it == players.end()) {
+            result([FlutterError errorWithCode:@"NO_PLAYER" message:@"Texture not found" details:nil]);
+            return;
+        }
+        
+        TexturePlayer *texPlayer = it->second.get();  // C++ shared_ptr to raw pointer
+        if (!texPlayer->pipLayer) {
+            texPlayer->pipLayer = [[PipDisplayLayer alloc] initWithTextureId:textureId];
+            // Add to view hierarchy (hidden)
+            CALayer *rootLayer = [UIApplication sharedApplication].windows.firstObject.rootViewController.view.layer;
+            if (rootLayer) {
+                [rootLayer addSublayer:texPlayer->pipLayer.displayLayer];
+            }
+            NSLog(@"Created and added PiP layer for texture %lld", textureId);
+        } else {
+            NSLog(@"PiP layer already exists for texture %lld", textureId);
+        }
+        
+        result(@YES);  // Success, layer ready for PiP controller
+    } else {
+        result(FlutterMethodNotImplemented);
+    }
+}
+// ios only, optional. called first in dealloc(texture registry is still alive). plugin instance must be registered via publish
+- (void)detachFromEngineForRegistrar:(NSObject<FlutterPluginRegistrar> *)registrar {
+    players.clear();
+}
+#if TARGET_OS_OSX
+#else
+- (void)applicationWillTerminate:(UIApplication *)application {
+    players.clear();
+}
+#endif
+@end
