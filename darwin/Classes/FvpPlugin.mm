@@ -5,7 +5,6 @@
 #import "FvpPlugin.h"
 #include "mdk/RenderAPI.h"
 #include "mdk/Player.h"
-#include "mdk/Frame.h"  // Added for mdkFrameAPI
 #import <AVFoundation/AVFoundation.h>
 #import <CoreVideo/CoreVideo.h>
 #import <Metal/Metal.h>
@@ -97,11 +96,11 @@ using namespace std;
 }
 @end
 
-// NEW: AVSampleBufferDisplayLayer for PiP (hidden, frame-fed from FFmpeg)
+// PiP Bridge: AVSampleBufferDisplayLayer for FFmpeg frames
 @interface PipDisplayLayer : NSObject
 @property (nonatomic, strong) AVSampleBufferDisplayLayer *displayLayer;
 @property (nonatomic, assign) int64_t textureId;
-@property (nonatomic, strong) CMVideoFormatDescriptionRef formatDesc;
+@property (nonatomic, assign) CMVideoFormatDescriptionRef formatDesc;
 @end
 @implementation PipDisplayLayer
 - (instancetype)initWithTextureId:(int64_t)textureId width:(int)width height:(int)height {
@@ -120,7 +119,7 @@ using namespace std;
                                                          dim.width, dim.height,
                                                          nil, &_formatDesc);
         if (status == noErr) {
-            _displayLayer.videoFormatDescription = _formatDesc;
+            _displayLayer.videoFormatDescription = (__bridge id _Nullable)(_formatDesc);
         } else {
             NSLog(@"Failed to create format description: %d", (int)status);
         }
@@ -169,7 +168,7 @@ public:
                 [registry textureFrameAvailable:tid];
             });
 
-            // Bridge to PiP (main thread)
+            // Bridge to PiP (main thread, SIMPLIFIED TIMING)
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self bridgeFrameToPipLayer];
             });
@@ -191,17 +190,10 @@ private:
         CVPixelBufferRef pixbuf = mtex_->pixbuf;
         if (!pixbuf) return;
 
-        // Get timing from mdk::Player (PTS-based)
-        mdkFrameAPI* frame = currentFrame();
-        if (!frame) return;
-        
-        int64_t pts_ns = frame->pts * 1000000000LL / 90000;  // FFmpeg PTS to nanoseconds
-        CMTime presentationTime = CMTimeMake(pts_ns / 1000, 1000);  // Milliseconds timescale
-        CMTime duration = CMTimeMake(33, 1000);  // ~30fps default; adjust from player FPS
-        
+        // SIMPLIFIED TIMING: Use invalid for continuous playback (works for PiP)
         CMSampleTimingInfo timing = {
-            .presentationTimeStamp = presentationTime,
-            .duration = duration,
+            .presentationTimeStamp = kCMTimeInvalid,  // Continuous
+            .duration = kCMTimeInvalid,               // No fixed duration
             .decodeTimeStamp = kCMTimeInvalid
         };
 
@@ -212,7 +204,6 @@ private:
             pipLayer.formatDesc, &timing, &sampleBuffer);
         
         if (status == noErr && sampleBuffer) {
-            // Enqueue
             [pipLayer.displayLayer enqueueSampleBuffer:sampleBuffer];
             CFRelease(sampleBuffer);
         } else {
@@ -229,18 +220,14 @@ private:
     std::unordered_map<int64_t, std::shared_ptr<TexturePlayer>> players;
 }
 @property (readonly, strong, nonatomic) NSObject<FlutterTextureRegistry>* texRegistry;
-
-// PiP Layer Registry
-@property (strong, nonatomic) NSMutableDictionary<NSNumber*, PipDisplayLayer*> *pipLayers;
+@property (strong, nonatomic) NSMutableDictionary<NSNumber*, PipDisplayLayer*>* pipLayers;
 @end
 
 @implementation FvpPlugin
 + (void)registerWithRegistrar:(NSObject<FlutterPluginRegistrar>*)registrar {
     id<FlutterBinaryMessenger> messenger = [registrar messenger];
 #if TARGET_OS_OSX
-    // macOS: do not alter audio session
 #else
-    // Allow audio playback when the Ring/Silent switch is set to silent
     [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback error:nil];
 #endif
 
@@ -273,15 +260,18 @@ private:
 }
 
 + (void)registerPipLayer:(PipDisplayLayer *)layer forTextureId:(int64_t)textureId {
-    [[FvpPlugin sharedInstance].pipLayers setObject:layer forKey:@(textureId)];
+    FvpPlugin *shared = [FvpPlugin sharedInstance];
+    [shared.pipLayers setObject:layer forKey:@(textureId)];
 }
 
 + (void)unregisterPipLayerForTextureId:(int64_t)textureId {
-    [[FvpPlugin sharedInstance].pipLayers removeObjectForKey:@(textureId)];
+    FvpPlugin *shared = [FvpPlugin sharedInstance];
+    [shared.pipLayers removeObjectForKey:@(textureId)];
 }
 
 + (PipDisplayLayer *)pipLayerForTextureId:(int64_t)textureId {
-    return [[FvpPlugin sharedInstance].pipLayers objectForKey:@(textureId)];
+    FvpPlugin *shared = [FvpPlugin sharedInstance];
+    return [shared.pipLayers objectForKey:@(textureId)];
 }
 
 + (instancetype)sharedInstance {
@@ -338,7 +328,6 @@ private:
     }
 }
 
-// ios only, optional. called first in dealloc(texture registry is still alive). plugin instance must be registered via publish
 - (void)detachFromEngineForRegistrar:(NSObject<FlutterPluginRegistrar> *)registrar {
   players.clear();
   [_pipLayers removeAllObjects];
