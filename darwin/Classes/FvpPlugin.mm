@@ -98,6 +98,11 @@ using namespace std;
     }
     return self;
 }
+- (void)dealloc {
+    if (_displayLayer.superlayer) {
+        [_displayLayer removeFromSuperlayer];
+    }
+}
 @end
 
 class TexturePlayer final: public Player
@@ -122,6 +127,7 @@ public:
             // NEW: Bridge to AVSampleBufferDisplayLayer for PiP
             [self bridgeFrameToPipLayer];
         });
+        pipLayer = nil;  // Initialize
     }
     ~TexturePlayer() override {
         setRenderCallback(nullptr);
