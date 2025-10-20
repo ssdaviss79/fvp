@@ -77,7 +77,7 @@ using namespace std;
     [blit copyFromTexture:texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(texture.width, texture.height, texture.depth)
         toTexture:fltex destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)]; // macos 10.15
     [blit endEncoding];
-	[cmdbuf commit];
+    [cmdbuf commit];
     return CVPixelBufferRetain(pixbuf);
 }
 @end
@@ -94,7 +94,6 @@ public:
         MetalRenderAPI ra{};
         ra.device = (__bridge void*)mtex_->device;
         ra.cmdQueue = (__bridge void*)mtex_->cmdQueue;
-// TODO: texture pool to avoid blitting
         ra.texture = (__bridge void*)mtex_->texture;
         setRenderAPI(&ra);
         setVideoSurfaceSize(width, height);
@@ -117,11 +116,30 @@ private:
     MetalTexture* mtex_ = nil;
 };
 
+// NEW: PiP Controller per texture
+@interface FvpPipController : NSObject <AVPictureInPictureControllerDelegate>
+@property (nonatomic, strong) AVPictureInPictureController *pipController;
+@property (nonatomic, strong) AVSampleBufferDisplayLayer *pipLayer;
+@property (nonatomic, assign) int64_t textureId;
+@end
+
+@implementation FvpPipController
+// Delegate methods (send logs via channel)
+- (void)pictureInPictureControllerDidStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
+    // Send to Dart: onPipStateChanged true
+}
+
+- (void)pictureInPictureControllerDidStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
+    // Send to Dart: onPipStateChanged false
+}
+// ... other delegates
+@end
 
 @interface FvpPlugin () {
     unordered_map<int64_t, shared_ptr<TexturePlayer>> players;
+    NSMutableDictionary<NSNumber*, FvpPipController*> *pipControllers;  // NEW: textureId -> PiP controller
 }
-@property(readonly, strong, nonatomic) NSObject<FlutterTextureRegistry>* texRegistry;  // FIXED: readonly (lowercase)
+@property(readOnly, strong, nonatomic) NSObject<FlutterTextureRegistry>* texRegistry;
 @end
 
 @implementation FvpPlugin
@@ -150,6 +168,7 @@ private:
     _texRegistry = registrar.textures;
 #else
     _texRegistry = [registrar textures];
+    pipControllers = [NSMutableDictionary dictionary];  // NEW: Init PiP map
 #endif
     return self;
 }
@@ -169,6 +188,43 @@ private:
         result(nil);
     } else if ([call.method isEqualToString:@"MixWithOthers"]) {
         [[maybe_unused]] const auto value = ((NSNumber*)call.arguments[@"value"]).boolValue;
+    } // NEW: PiP Methods
+    else if ([call.method isEqualToString:@"isPipSupported"]) {
+        BOOL supported = [AVPictureInPictureController isPictureInPictureSupported];
+        result(@(supported));
+    } else if ([call.method isEqualToString:@"enablePiP"]) {
+        NSNumber *texIdNum = call.arguments[@"textureId"];
+        if (!texIdNum) {
+            result([FlutterError errorWithCode:@"INVALID_ARGS" message:@"Missing textureId" details:nil]);
+            return;
+        }
+        int64_t texId = [texIdNum longLongValue];
+        
+        if ([self enablePipForTexture:texId]) {
+            result(@YES);
+        } else {
+            result(@NO);
+        }
+    } else if ([call.method isEqualToString:@"enterPipMode"]) {
+        NSDictionary *args = call.arguments;
+        NSNumber *texIdNum = args[@"textureId"];
+        NSNumber *widthNum = args[@"width"];
+        NSNumber *heightNum = args[@"height"];
+        
+        if (!texIdNum || !widthNum || !heightNum) {
+            result([FlutterError errorWithCode:@"INVALID_ARGS" message:@"Missing args" details:nil]);
+            return;
+        }
+        
+        int64_t texId = [texIdNum longLongValue];
+        int width = [widthNum intValue];
+        int height = [heightNum intValue];
+        
+        if ([self enterPipModeForTexture:texId width:width height:height]) {
+            result(@YES);
+        } else {
+            result(@NO);
+        }
 #if TARGET_OS_OSX
 #else
         if (value) {
@@ -180,6 +236,30 @@ private:
         result(nil);
     } else {
         result(FlutterMethodNotImplemented);
+    }
+}
+
+// NEW: Enter PiP mode
+- (BOOL)enterPipModeForTexture:(int64_t)texId width:(int)width height:(int)height {
+    FvpPipController *pipCtrl = pipControllers[@(texId)];
+    if (!pipCtrl || !pipCtrl.pipController) return NO;
+    
+    if (pipCtrl.pipController.isPictureInPicturePossible) {
+        [pipCtrl.pipController startPictureInPicture];
+        return YES;
+    }
+    return NO;
+}
+
+// NEW: Delegate forwarding
+- (void)pictureInPictureControllerDidStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
+    // Find textureId and notify Dart
+    for (NSNumber *texIdNum in pipControllers) {
+        FvpPipController *ctrl = pipControllers[texIdNum];
+        if (ctrl.pipController == pictureInPictureController) {
+            // Send event: {"method": "onPipStateChanged", "textureId": texId, "active": true}
+            break;
+        }
     }
 }
 
