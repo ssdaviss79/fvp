@@ -184,6 +184,9 @@ void TexturePlayer::bridgeFrameToPipLayer() {
     std::unordered_map<int64_t, std::shared_ptr<TexturePlayer>> players;
 }
 @property (readonly, strong, nonatomic) NSObject<FlutterTextureRegistry>* texRegistry;
+
+// NEW: Declare initWithRegistrar for PiP
+- (instancetype)initWithRegistrar:(NSObject<FlutterPluginRegistrar> *)registrar;
 @end
 
 @implementation FvpPlugin
@@ -203,4 +206,4 @@ void TexturePlayer::bridgeFrameToPipLayer() {
 #endif
     [registrar publish:instance];
     [registrar addMethodCallDelegate:instance channel:channel];
-    SetGlobalOption("MDK_KEY", "C03BFF5306AB39058A767105F82697F42A00FE970FB0E641D306DEFF3F220547E5E5377A3C504DC30D547890E71059BC023A4DD91A95474D1F33CA
+    SetGlobalOption("MDK_KEY", "C03BFF5306AB39058A767105F82697F42A00FE970FB0E641D306DEFF
