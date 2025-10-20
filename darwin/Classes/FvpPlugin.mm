@@ -33,28 +33,37 @@ using namespace std;
     if (self) {
         device = MTLCreateSystemDefaultDevice();
         cmdQueue = [device newCommandQueue];
-        auto td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:width height:height mipmapped:NO];
+        MTLTextureDescriptor *td =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                               width:width
+                                                              height:height
+                                                           mipmapped:NO];
         td.usage = MTLTextureUsageRenderTarget;
         texture = [device newTextureWithDescriptor:td];
-        //assert(!texture.iosurface); // CVPixelBufferCreateWithIOSurface(fltex.iosurface)
-        auto attr = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+
+        auto attr = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
+                                              &kCFTypeDictionaryKeyCallBacks,
+                                              &kCFTypeDictionaryValueCallBacks);
         CFDictionarySetValue(attr, kCVPixelBufferMetalCompatibilityKey, kCFBooleanTrue);
-        auto iosurface_props = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-        CFDictionarySetValue(attr, kCVPixelBufferIOSurfacePropertiesKey, iosurface_props); // optional?
+        auto iosurface_props =
+            CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
+                                      &kCFTypeDictionaryKeyCallBacks,
+                                      &kCFTypeDictionaryValueCallBacks);
+        CFDictionarySetValue(attr, kCVPixelBufferIOSurfacePropertiesKey, iosurface_props);
         CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, attr, &pixbuf);
         CFRelease(attr);
         texCache = nullptr;
 #if (USE_TEXCACHE + 0)
         CVMetalTextureCacheCreate(nullptr, nullptr, device, nullptr, &texCache);
         CVMetalTextureRef cvtex;
-        CVMetalTextureCacheCreateTextureFromImage(nil, texCache, pixbuf, nil, MTLPixelFormatBGRA8Unorm, width, height, 0, &cvtex);
+        CVMetalTextureCacheCreateTextureFromImage(nil, texCache, pixbuf, nil,
+                                                  MTLPixelFormatBGRA8Unorm,
+                                                  width, height, 0, &cvtex);
         fltex = CVMetalTextureGetTexture(cvtex);
         CFRelease(cvtex);
 #else
         auto iosurface = CVPixelBufferGetIOSurface(pixbuf);
-        td.usage = MTLTextureUsageShaderRead; // Unknown?
-// macos: failed assertion `Texture Descriptor Validation IOSurface textures must use MTLStorageModeManaged or MTLStorageModeShared'
-// ios: failed assertion `Texture Descriptor Validation IOSurface textures must use MTLStorageModeShared
+        td.usage = MTLTextureUsageShaderRead;
         fltex = [device newTextureWithDescriptor:td iosurface:iosurface plane:0];
 #endif
     }
@@ -69,12 +78,18 @@ using namespace std;
     }
 }
 - (CVPixelBufferRef _Nullable)copyPixelBuffer {
-    //return CVPixelBufferRetain(pixbuf);
     std::lock_guard<std::mutex> lock(mtx);
-    auto cmdbuf = [cmdQueue commandBuffer];
-    auto blit = [cmdbuf blitCommandEncoder];
-    [blit copyFromTexture:texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(texture.width, texture.height, texture.depth)
-        toTexture:fltex destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)]; // macos 10.15
+    id<MTLCommandBuffer> cmdbuf = [cmdQueue commandBuffer];
+    id<MTLBlitCommandEncoder> blit = [cmdbuf blitCommandEncoder];
+    [blit copyFromTexture:texture
+              sourceSlice:0
+              sourceLevel:0
+             sourceOrigin:MTLOriginMake(0, 0, 0)
+               sourceSize:MTLSizeMake(texture.width, texture.height, texture.depth)
+               toTexture:fltex
+        destinationSlice:0
+        destinationLevel:0
+       destinationOrigin:MTLOriginMake(0, 0, 0)];
     [blit endEncoding];
     [cmdbuf commit];
     return CVPixelBufferRetain(pixbuf);
@@ -93,8 +108,8 @@ using namespace std;
         _textureId = textureId;
         _displayLayer = [AVSampleBufferDisplayLayer layer];
         _displayLayer.videoGravity = AVLayerVideoGravityResizeAspect;
-        _displayLayer.hidden = YES;  // Hidden for PiP only
-        _displayLayer.frame = CGRectZero;  // Offscreen
+        _displayLayer.hidden = YES;
+        _displayLayer.frame = CGRectZero;
     }
     return self;
 }
@@ -105,100 +120,112 @@ using namespace std;
 }
 @end
 
-class TexturePlayer final: public Player
+class TexturePlayer final : public Player
 {
 public:
-    TexturePlayer(int64_t handle, int width, int height, NSObject<FlutterTextureRegistry>* texReg);
-    ~TexturePlayer() override;
+    TexturePlayer(int64_t handle, int width, int height,
+                  NSObject<FlutterTextureRegistry>* texReg)
+        : Player(reinterpret_cast<mdkPlayerAPI*>(handle))
+    {
+        mtex_ = [[MetalTexture alloc] initWithWidth:width height:height];
+        texId_ = [texReg registerTexture:mtex_];
+
+        MetalRenderAPI ra{};
+        ra.device   = (__bridge void*)mtex_->device;
+        ra.cmdQueue = (__bridge void*)mtex_->cmdQueue;
+        ra.texture  = (__bridge void*)mtex_->texture;
+        setRenderAPI(&ra);
+        setVideoSurfaceSize(width, height);
+
+        // SAFELY call Objective-C from within C++ lambda
+        setRenderCallback([this, texReg](void* opaque) {
+            std::lock_guard<std::mutex> lock(mtex_->mtx);
+            renderVideo();
+
+            int64_t tid = this->texId_;
+            __unsafe_unretained NSObject<FlutterTextureRegistry>* registry = texReg;
+
+            // Notify Flutter on main thread
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [registry textureFrameAvailable:tid];
+            });
+
+            // Bridge to PiP
+            bridgeFrameToPipLayer();
+        });
+
+        pipLayer = nil;
+    }
+
+    ~TexturePlayer() override {
+        setRenderCallback(nullptr);
+        setVideoSurfaceSize(-1, -1);
+        if (pipLayer) {
+            [pipLayer.displayLayer removeFromSuperlayer];
+            pipLayer = nil;
+        }
+    }
+
     int64_t textureId() const { return texId_; }
-    
-    // NEW: Public accessors for pipLayer
+
+    // NEW: Bridge FFmpeg frame to AVSampleBufferDisplayLayer
+    void bridgeFrameToPipLayer() {
+        if (!pipLayer || !pipLayer.displayLayer) return;
+        CVPixelBufferRef pixbuf = mtex_->pixbuf;
+        if (!pixbuf) return;
+
+        CMSampleTimingInfo timing = {
+            .presentationTimeStamp = kCMTimeInvalid,
+            .duration = kCMTimeInvalid,
+            .decodeTimeStamp = kCMTimeInvalid
+        };
+
+        CMVideoFormatDescriptionRef formatDesc;
+        OSStatus status = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault,
+                                                                       pixbuf,
+                                                                       &formatDesc);
+        if (status != noErr) return;
+
+        CMSampleBufferRef sampleBuffer;
+        status = CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault,
+                                                          pixbuf, formatDesc,
+                                                          &timing, &sampleBuffer);
+        CFRelease(formatDesc);
+        if (status != noErr || !sampleBuffer) return;
+
+        [pipLayer.displayLayer enqueueSampleBuffer:sampleBuffer];
+        CFRelease(sampleBuffer);
+    }
+
+    // NEW: Getter for pipLayer (public access for ObjC)
     PipDisplayLayer *getPipLayer() { return pipLayer; }
     void setPipLayer(PipDisplayLayer *layer) { pipLayer = layer; }
-    
-    // NEW: Bridge FFmpeg frame to AVSampleBufferDisplayLayer
-    void bridgeFrameToPipLayer();
-    
+
 private:
     int64_t texId_ = 0;
     MetalTexture* mtex_ = nil;
-    PipDisplayLayer *pipLayer = nil;  // NEW: For PiP (now public via getters)
+    PipDisplayLayer *pipLayer = nil;
 };
-
-// Implement constructor
-TexturePlayer::TexturePlayer(int64_t handle, int width, int height, NSObject<FlutterTextureRegistry>* texReg)
-    : Player(reinterpret_cast<mdkPlayerAPI*>(handle))
-{
-    mtex_ = [[MetalTexture alloc] initWithWidth:width height:height];
-    texId_ = [texReg registerTexture:mtex_];
-    MetalRenderAPI ra{};
-    ra.device = (__bridge void*)mtex_->device;
-    ra.cmdQueue = (__bridge void*)mtex_->cmdQueue;
-    ra.texture = (__bridge void*)mtex_->texture;
-    setRenderAPI(&ra);
-    setVideoSurfaceSize(width, height);
-    setRenderCallback([this, texReg](void* opaque){
-        std::lock_guard<std::mutex> lock(mtex_->mtx);
-        renderVideo();
-        [texReg textureFrameAvailable:texId_];
-        
-        // NEW: Bridge to AVSampleBufferDisplayLayer for PiP
-        bridgeFrameToPipLayer();
-    });
-    pipLayer = nil;  // Initialize
-}
-
-TexturePlayer::~TexturePlayer() {
-    setRenderCallback(nullptr);
-    setVideoSurfaceSize(-1, -1);
-    if (pipLayer) {
-        [pipLayer.displayLayer removeFromSuperlayer];
-        pipLayer = nil;
-    }
-}
-
-// Implement bridgeFrameToPipLayer
-void TexturePlayer::bridgeFrameToPipLayer() {
-    if (!pipLayer || !pipLayer.displayLayer) return;
-    
-    CVPixelBufferRef pixbuf = mtex_->pixbuf;  // From FFmpeg decode
-    if (!pixbuf) return;
-    
-    // Create CMSampleBuffer from pixbuf (timing from FFmpeg PTS)
-    CMSampleTimingInfo timing = { .presentationTimeStamp = kCMTimeInvalid, .duration = kCMTimeInvalid, .decodeTimeStamp = kCMTimeInvalid };  // Get from FFmpeg (e.g., frame->pts)
-    // Assume getFrameTiming() from mdk (adapt as needed)
-    CMVideoFormatDescriptionRef formatDesc;
-    OSStatus status = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pixbuf, &formatDesc);
-    if (status != noErr) return;
-    
-    CMSampleBufferRef sampleBuffer;
-    status = CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, pixbuf, formatDesc, &timing, &sampleBuffer);
-    CFRelease(formatDesc);
-    if (status != noErr || !sampleBuffer) return;
-    
-    [pipLayer.displayLayer enqueueSampleBuffer:sampleBuffer];
-    CFRelease(sampleBuffer);
-}
 
 @interface FvpPlugin () {
     std::unordered_map<int64_t, std::shared_ptr<TexturePlayer>> players;
 }
 @property (readonly, strong, nonatomic) NSObject<FlutterTextureRegistry>* texRegistry;
-
-// NEW: Declare initWithRegistrar for PiP
-- (instancetype)initWithRegistrar:(NSObject<FlutterPluginRegistrar> *)registrar;
 @end
 
 @implementation FvpPlugin
 + (void)registerWithRegistrar:(NSObject<FlutterPluginRegistrar>*)registrar {
+    id<FlutterBinaryMessenger> messenger = [registrar messenger];
 #if TARGET_OS_OSX
-    auto messenger = registrar.messenger;
+    // macOS: do not alter audio session
 #else
-    auto messenger = [registrar messenger];
     // Allow audio playback when the Ring/Silent switch is set to silent
     [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback error:nil];
 #endif
-    FlutterMethodChannel* channel = [FlutterMethodChannel methodChannelWithName:@"fvp" binaryMessenger:messenger];
+
+    FlutterMethodChannel* channel =
+        [FlutterMethodChannel methodChannelWithName:@"fvp"
+                                    binaryMessenger:messenger];
     FvpPlugin* instance = [[FvpPlugin alloc] initWithRegistrar:registrar];
 #if TARGET_OS_OSX
 #else
@@ -206,4 +233,8 @@ void TexturePlayer::bridgeFrameToPipLayer() {
 #endif
     [registrar publish:instance];
     [registrar addMethodCallDelegate:instance channel:channel];
-    SetGlobalOption("MDK_KEY", "C03BFF5306AB39058A767105F82697F42A00FE970FB0E641D306DEFF
+
+    SetGlobalOption("MDK_KEY",
+        "C03BFF5306AB39058A767105F82697F42A00FE970FB0E641D306DEFF3F220547E5E5377A3C504DC30D547890E71059BC023A4DD91A95474D1F33CA4C26C81B0FC73B00ACF954C6FA75898EFA07D9680B6A00FDF179C0A15381101D01124498AF55B069BD4B0156D5CF5A56DEDE782E5F3930AD47C8F40BFBA379231142E31B0F");
+}
+@end
