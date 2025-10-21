@@ -128,10 +128,12 @@ private:
     unordered_map<int64_t, shared_ptr<TexturePlayer>> players;
 }
 @property(readonly, strong, nonatomic) NSObject<FlutterTextureRegistry>* texRegistry;
+#if TARGET_OS_IPHONE
 @property (nonatomic, strong) NSMutableDictionary<NSNumber*, AVPlayerLayer*> *pipLayers;
 @property (nonatomic, strong) NSMutableDictionary<NSNumber*, AVPictureInPictureController*> *pipControllers;
 @property (nonatomic, strong) NSMutableDictionary<NSNumber*, NSNumber*> *pipActiveFlags;
 @property (nonatomic, strong) NSMutableDictionary<NSNumber*, AVPlayer*> *pipPlayers;
+#endif
 @end
 
 @implementation FvpPlugin
@@ -161,11 +163,13 @@ private:
 #else
     _texRegistry = [registrar textures];
 #endif
+#if TARGET_OS_IPHONE
     // Initialize PiP-related dictionaries
     _pipLayers = [NSMutableDictionary dictionary];
     _pipControllers = [NSMutableDictionary dictionary];
     _pipActiveFlags = [NSMutableDictionary dictionary];
     _pipPlayers = [NSMutableDictionary dictionary];
+#endif
     return self;
 }
 
@@ -182,6 +186,7 @@ private:
         [_texRegistry unregisterTexture:texId];
         players.erase(texId);
         
+#if TARGET_OS_IPHONE
         // Clean up PiP resources for this texture
         AVPictureInPictureController *pipController = [_pipControllers objectForKey:@(texId)];
         if (pipController) {
@@ -191,6 +196,7 @@ private:
         [_pipLayers removeObjectForKey:@(texId)];
         [_pipPlayers removeObjectForKey:@(texId)];
         [_pipActiveFlags removeObjectForKey:@(texId)];
+#endif
         
         result(nil);
     } else if ([call.method isEqualToString:@"MixWithOthers"]) {
@@ -204,6 +210,7 @@ private:
         }
 #endif
         result(nil);
+#if TARGET_OS_IPHONE
     } else if ([call.method isEqualToString:@"enablePipForTexture"]) {
         NSNumber *textureIdNum = call.arguments[@"textureId"];
         int64_t textureId = [textureIdNum longLongValue];
@@ -274,11 +281,13 @@ private:
             NSLog(@"✅ PiP mode stopped for texture %lld", textureId);
         }
         result(@YES);
+#endif
     } else {
         result(FlutterMethodNotImplemented);
     }
 }
 
+#if TARGET_OS_IPHONE
 #pragma mark - PiP Frame Synchronization
 
 - (void)syncFrameToPipForTextureId:(int64_t)textureId pixelBuffer:(CVPixelBufferRef)pixelBuffer {
@@ -334,7 +343,9 @@ private:
     
     return sampleBuffer;
 }
+#endif
 
+#if TARGET_OS_IPHONE
 #pragma mark - AVPictureInPictureControllerDelegate
 
 - (void)pictureInPictureControllerWillStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
@@ -369,11 +380,13 @@ private:
     NSLog(@"✅ PiP restore user interface");
     completionHandler(YES);
 }
+#endif
 
 // ios only, optional. called first in dealloc(texture registry is still alive). plugin instance must be registered via publish
 - (void)detachFromEngineForRegistrar:(NSObject<FlutterPluginRegistrar> *)registrar {
   players.clear();
   
+#if TARGET_OS_IPHONE
   // Clean up all PiP resources
   for (AVPictureInPictureController *controller in _pipControllers.allValues) {
     [controller stopPictureInPicture];
@@ -382,6 +395,7 @@ private:
   [_pipLayers removeAllObjects];
   [_pipPlayers removeAllObjects];
   [_pipActiveFlags removeAllObjects];
+#endif
 }
 
 #if TARGET_OS_OSX
@@ -389,6 +403,7 @@ private:
 - (void)applicationWillTerminate:(UIApplication *)application {
   players.clear();
   
+#if TARGET_OS_IPHONE
   // Clean up all PiP resources
   for (AVPictureInPictureController *controller in _pipControllers.allValues) {
     [controller stopPictureInPicture];
@@ -397,6 +412,7 @@ private:
   [_pipLayers removeAllObjects];
   [_pipPlayers removeAllObjects];
   [_pipActiveFlags removeAllObjects];
+#endif
 }
 #endif
 @end
