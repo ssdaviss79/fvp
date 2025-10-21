@@ -12,8 +12,8 @@
 
 // Properties used in implementation
 @property (nonatomic, strong, readonly) NSObject<FlutterTextureRegistry> *texRegistry;
-@property (nonatomic, strong) FlutterMethodChannel *channel;
-@property (nonatomic, strong) NSMutableDictionary<NSNumber*, FvpPipController*> *pipControllers;
+@property (nonatomic, strong, readwrite) FlutterMethodChannel *channel;
+@property (nonatomic, strong, readwrite) NSMutableDictionary<NSNumber*, FvpPipController*> *pipControllers;
 
 // Designated initializer
 - (instancetype)initWithRegistrar:(NSObject<FlutterPluginRegistrar>*)registrar;
