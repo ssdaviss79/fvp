@@ -3,8 +3,5 @@
 #else
 #import <FlutterMacOS/FlutterMacOS.h>
 #endif
-#import <AVFoundation/AVFoundation.h>
-
-@interface FvpPlugin : NSObject<FlutterPlugin, AVPictureInPictureControllerDelegate>
-@property(readonly, strong, nonatomic) FlutterMethodChannel* channel;
+@interface FvpPlugin : NSObject<FlutterPlugin>
 @end
