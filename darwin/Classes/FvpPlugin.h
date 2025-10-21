@@ -6,6 +6,10 @@
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
 
+#if TARGET_OS_IPHONE
 @interface FvpPlugin : NSObject<FlutterPlugin, AVPictureInPictureControllerDelegate>
+#else
+@interface FvpPlugin : NSObject<FlutterPlugin>
+#endif
 - (void)syncFrameToPipForTextureId:(int64_t)textureId pixelBuffer:(CVPixelBufferRef)pixelBuffer;
 @end
