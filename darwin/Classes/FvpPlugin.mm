@@ -324,7 +324,7 @@ private:
     
     // Create sample buffer
     CMSampleBufferRef sampleBuffer = NULL;
-    status = CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, pixelBuffer, formatDescription, NULL, NULL, &sampleBuffer);
+    status = CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault, pixelBuffer, true, NULL, NULL, formatDescription, NULL, &sampleBuffer);
     
     CFRelease(formatDescription);
     
