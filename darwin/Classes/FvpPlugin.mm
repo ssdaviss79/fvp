@@ -170,7 +170,7 @@ private:
 }
 @property(readonly, strong, nonatomic) NSObject<FlutterTextureRegistry>* texRegistry;
 @property(strong, nonatomic) NSMutableDictionary<NSNumber*, AVPictureInPictureController*>* pipControllers;
-@property(strong, nonatomic) NSMutableDictionary<NSNumber*, AVSampleBufferDisplayLayer*>* pipDisplayLayers;
+@property(strong, nonatomic) NSMutableDictionary<NSNumber*, AVPlayerLayer*>* pipLayers;
 @property(strong, nonatomic) NSMutableDictionary<NSNumber*, UIView*>* pipDummyViews;
 @end
 
@@ -203,7 +203,7 @@ private:
 #endif
     // Initialize PiP state management dictionaries
     _pipControllers = [NSMutableDictionary dictionary];
-    _pipDisplayLayers = [NSMutableDictionary dictionary];
+    _pipLayers = [NSMutableDictionary dictionary];
     _pipDummyViews = [NSMutableDictionary dictionary];
     return self;
 }
@@ -262,7 +262,7 @@ private:
         [[UIApplication sharedApplication].windows.firstObject.rootViewController.view addSubview:dummyView];
         
         // Store references
-        [_pipDisplayLayers setObject:pipLayer forKey:@(textureId)];
+        [_pipLayers setObject:pipLayer forKey:@(textureId)];
         [_pipDummyViews setObject:dummyView forKey:@(textureId)];
         
         NSLog(@"✅ PiP layer created for texture %lld", textureId);
@@ -271,7 +271,7 @@ private:
         NSNumber *textureIdNum = call.arguments[@"textureId"];
         int64_t textureId = [textureIdNum longLongValue];
         
-        AVPlayerLayer *pipLayer = [_pipDisplayLayers objectForKey:@(textureId)];
+        AVPlayerLayer *pipLayer = [_pipLayers objectForKey:@(textureId)];
         if (!pipLayer) {
             result([FlutterError errorWithCode:@"NO_LAYER" message:@"PiP not enabled for texture" details:nil]);
             return;
@@ -355,9 +355,9 @@ private:
     completionHandler(YES);
 }
 
-// Helper method to get display layer for texture
-- (AVSampleBufferDisplayLayer*)getDisplayLayerForTexture:(int64_t)textureId {
-    return [_pipDisplayLayers objectForKey:@(textureId)];
+// Helper method to get player layer for texture
+- (AVPlayerLayer*)getDisplayLayerForTexture:(int64_t)textureId {
+    return [_pipLayers objectForKey:@(textureId)];
 }
 
 // Helper method to get PiP controller for texture
@@ -382,8 +382,8 @@ private:
     }
     [_pipControllers removeObjectForKey:textureIdNum];
     
-    // Clean up display layer
-    [_pipDisplayLayers removeObjectForKey:textureIdNum];
+    // Clean up player layer
+    [_pipLayers removeObjectForKey:textureIdNum];
     
     // Clean up dummy view
     UIView *dummyView = [_pipDummyViews objectForKey:textureIdNum];
