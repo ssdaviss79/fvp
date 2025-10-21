@@ -11,6 +11,9 @@
 #import <CoreVideo/CoreVideo.h>
 #import <Metal/Metal.h>
 #import <CoreMedia/CoreMedia.h>
+#if TARGET_OS_IPHONE
+#import <AVKit/AVKit.h>
+#endif
 #include <mutex>
 #include <unordered_map>
 #include <iostream>
