@@ -119,7 +119,7 @@ public:
 
     int64_t textureId() const { return texId_;}
     
-    void TexturePlayer::syncFrameToPip() {
+    void syncFrameToPip() {
         if (!plugin_ || ![plugin_ getPipControllerForTexture:texId_].isPictureInPictureActive) return;
         CVPixelBufferRef pixelBuffer = [mtex_ copyPixelBuffer];
         if (!pixelBuffer) {
@@ -130,14 +130,14 @@ public:
         if (sampleBuffer) {
             AVSampleBufferDisplayLayer *displayLayer = [plugin_ getDisplayLayerForTexture:texId_];
             if (displayLayer) {
-                [displayLayer enqueue:sampleBuffer];
-                [self sendLogToFlutter:@"Native: ✅ Frame enqueued to PiP"];
+                [displayLayer enqueueSampleBuffer:sampleBuffer];
+                [plugin_ sendLogToFlutter:@"Native: ✅ Frame enqueued to PiP"];
             } else {
-                [self sendLogToFlutter:@"Native: ❌ No display layer"];
+                [plugin_ sendLogToFlutter:@"Native: ❌ No display layer"];
             }
             CFRelease(sampleBuffer);
         } else {
-            [self sendLogToFlutter:@"Native: ❌ Failed to create sample buffer"];
+            [plugin_ sendLogToFlutter:@"Native: ❌ Failed to create sample buffer"];
         }
         CVPixelBufferRelease(pixelBuffer);
     }
@@ -368,8 +368,8 @@ private:
 }
 
 // Helper method to get player layer for global PiP
-- (AVPlayerLayer*)getDisplayLayerForTexture:(int64_t)textureId {
-    return [_pipLayers objectForKey:@(0)];  // Always use global key 0
+- (AVSampleBufferDisplayLayer*)getDisplayLayerForTexture:(int64_t)textureId {
+    return [_pipLayers objectForKey:@(textureId)]; // Use textureId, not @(0)
 }
 
 // Helper method to get PiP controller for global PiP
