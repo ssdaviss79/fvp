@@ -424,6 +424,7 @@ private:
     NSLog(@"🔧 PiP: Controller: %@", pictureInPictureController);
     NSLog(@"🔧 PiP: Is PiP active: %@", pictureInPictureController.isPictureInPictureActive ? @"YES" : @"NO");
     [self sendLogToFlutter:@"Native: ✅ PiP did start"];
+    // Could notify Flutter via channel if needed
 }
 
 - (void)pictureInPictureControllerWillStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
@@ -435,6 +436,7 @@ private:
     NSLog(@"✅ PiP: Did stop Picture-in-Picture");
     NSLog(@"🔧 PiP: Controller: %@", pictureInPictureController);
     [self sendLogToFlutter:@"Native: ✅ PiP did stop"];
+    // Could notify Flutter via channel if needed
 }
 
 - (void)pictureInPictureController:(AVPictureInPictureController *)pictureInPictureController failedToStartPictureInPictureWithError:(NSError *)error {
