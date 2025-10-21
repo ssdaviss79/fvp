@@ -8,7 +8,7 @@
 #include "mdk/RenderAPI.h"
 #include "mdk/Player.h"
 #import <AVFoundation/AVFoundation.h>
-#import <AVKit/AVKit.h>
+// #import <AVKit/AVKit.h>
 #import <CoreVideo/CoreVideo.h>
 #import <Metal/Metal.h>
 #import <CoreMedia/CoreMedia.h>
