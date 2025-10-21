@@ -215,6 +215,14 @@ private:
         result(nil);
     } else if ([call.method isEqualToString:@"MixWithOthers"]) {
         [[maybe_unused]] const auto value = ((NSNumber*)call.arguments[@"value"]).boolValue;
+#if !TARGET_OS_OSX
+        if (value) {
+            [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback withOptions:AVAudioSessionCategoryOptionMixWithOthers error:nil];
+        } else {
+            [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback error:nil];
+        }
+#endif
+        result(nil);
     }
     // ✅ FIXED: PiP methods
     else if (@available(iOS 14.0, *)) {
@@ -264,6 +272,8 @@ private:
                 }
             }
             result(@YES);
+        } else {
+            result(FlutterMethodNotImplemented);
         }
     } else {
         result(FlutterMethodNotImplemented);
