@@ -235,15 +235,8 @@ private:
 #endif
         result(nil);
     } else if ([call.method isEqualToString:@"enablePipForTexture"]) {
-        NSNumber *textureIdNum = call.arguments[@"textureId"];
-        int64_t textureId = [textureIdNum longLongValue];
-        
-        // Check if texture exists
-        auto it = players.find(textureId);
-        if (it == players.end()) {
-            result([FlutterError errorWithCode:@"NO_TEXTURE" message:@"Texture not found" details:nil]);
-            return;
-        }
+        // Use a simple approach without textureId dependency
+        // Create a global PiP setup that works with any video
         
         // Create a simple approach: use a dummy video file for PiP
         // This is a workaround since we can't easily sync mdk frames to AVPlayerLayer
@@ -261,19 +254,17 @@ private:
         dummyView.hidden = YES;
         [[UIApplication sharedApplication].windows.firstObject.rootViewController.view addSubview:dummyView];
         
-        // Store references
-        [_pipLayers setObject:pipLayer forKey:@(textureId)];
-        [_pipDummyViews setObject:dummyView forKey:@(textureId)];
+        // Store references using a simple key (0 for global PiP)
+        [_pipLayers setObject:pipLayer forKey:@(0)];
+        [_pipDummyViews setObject:dummyView forKey:@(0)];
         
-        NSLog(@"✅ PiP layer created for texture %lld", textureId);
+        NSLog(@"✅ PiP layer created for global PiP");
         result(@YES);
     } else if ([call.method isEqualToString:@"enterPipMode"]) {
-        NSNumber *textureIdNum = call.arguments[@"textureId"];
-        int64_t textureId = [textureIdNum longLongValue];
-        
-        AVPlayerLayer *pipLayer = [_pipLayers objectForKey:@(textureId)];
+        // Use global PiP layer (key 0)
+        AVPlayerLayer *pipLayer = [_pipLayers objectForKey:@(0)];
         if (!pipLayer) {
-            result([FlutterError errorWithCode:@"NO_LAYER" message:@"PiP not enabled for texture" details:nil]);
+            result([FlutterError errorWithCode:@"NO_LAYER" message:@"PiP not enabled" details:nil]);
             return;
         }
         
@@ -290,19 +281,17 @@ private:
             pipController.canStartPictureInPictureAutomaticallyFromInline = YES;
         }
         
-        [_pipControllers setObject:pipController forKey:@(textureId)];
+        [_pipControllers setObject:pipController forKey:@(0)];
         [pipController startPictureInPicture];
         
-        NSLog(@"✅ PiP mode entered for texture %lld", textureId);
+        NSLog(@"✅ PiP mode entered for global PiP");
         result(@YES);
     } else if ([call.method isEqualToString:@"exitPipMode"]) {
-        NSNumber *textureIdNum = call.arguments[@"textureId"];
-        int64_t textureId = [textureIdNum longLongValue];
-        
-        AVPictureInPictureController *pipController = [_pipControllers objectForKey:@(textureId)];
+        // Use global PiP controller (key 0)
+        AVPictureInPictureController *pipController = [_pipControllers objectForKey:@(0)];
         if (pipController) {
             [pipController stopPictureInPicture];
-            NSLog(@"✅ PiP mode exited for texture %lld", textureId);
+            NSLog(@"✅ PiP mode exited for global PiP");
         }
         result(@YES);
     } else {
@@ -355,14 +344,14 @@ private:
     completionHandler(YES);
 }
 
-// Helper method to get player layer for texture
+// Helper method to get player layer for global PiP
 - (AVPlayerLayer*)getDisplayLayerForTexture:(int64_t)textureId {
-    return [_pipLayers objectForKey:@(textureId)];
+    return [_pipLayers objectForKey:@(0)];  // Always use global key 0
 }
 
-// Helper method to get PiP controller for texture
+// Helper method to get PiP controller for global PiP
 - (AVPictureInPictureController*)getPipControllerForTexture:(int64_t)textureId {
-    return [_pipControllers objectForKey:@(textureId)];
+    return [_pipControllers objectForKey:@(0)];  // Always use global key 0
 }
 
 // Helper method to send logs to Flutter
@@ -373,26 +362,27 @@ private:
 
 // Helper method to cleanup PiP resources
 - (void)cleanupPipForTextureId:(int64_t)textureId {
-    NSNumber *textureIdNum = @(textureId);
+    // Clean up global PiP resources (key 0)
+    NSNumber *globalKey = @(0);
     
     // Stop PiP controller if active
-    AVPictureInPictureController *pipController = [_pipControllers objectForKey:textureIdNum];
+    AVPictureInPictureController *pipController = [_pipControllers objectForKey:globalKey];
     if (pipController && pipController.isPictureInPictureActive) {
         [pipController stopPictureInPicture];
     }
-    [_pipControllers removeObjectForKey:textureIdNum];
+    [_pipControllers removeObjectForKey:globalKey];
     
     // Clean up player layer
-    [_pipLayers removeObjectForKey:textureIdNum];
+    [_pipLayers removeObjectForKey:globalKey];
     
     // Clean up dummy view
-    UIView *dummyView = [_pipDummyViews objectForKey:textureIdNum];
+    UIView *dummyView = [_pipDummyViews objectForKey:globalKey];
     if (dummyView) {
         [dummyView removeFromSuperview];
-        [_pipDummyViews removeObjectForKey:textureIdNum];
+        [_pipDummyViews removeObjectForKey:globalKey];
     }
     
-    NSLog(@"🧹 Cleaned up PiP resources for texture %lld", textureId);
+    NSLog(@"🧹 Cleaned up global PiP resources");
 }
 
 // ios only, optional. called first in dealloc(texture registry is still alive). plugin instance must be registered via publish
