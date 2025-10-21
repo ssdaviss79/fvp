@@ -107,7 +107,7 @@ public:
             [texReg textureFrameAvailable:texId_];
             
             // Sync frame to PiP if enabled
-            [self syncFrameToPip];
+            syncFrameToPip();
         });
     }
 
@@ -126,14 +126,14 @@ public:
         if (!pixelBuffer) return;
         
         // Check if PiP is enabled for this texture
-        AVSampleBufferDisplayLayer *displayLayer = [plugin_.pipDisplayLayers objectForKey:@(texId_)];
+        AVSampleBufferDisplayLayer *displayLayer = [plugin_ getDisplayLayerForTexture:texId_];
         if (!displayLayer) {
             CVPixelBufferRelease(pixelBuffer);
             return;
         }
         
         // Create CMSampleBuffer from CVPixelBuffer
-        CMSampleBufferRef sampleBuffer = [self createSampleBufferFromPixelBuffer:pixelBuffer];
+        CMSampleBufferRef sampleBuffer = createSampleBufferFromPixelBuffer(pixelBuffer);
         if (sampleBuffer) {
             [displayLayer enqueueSampleBuffer:sampleBuffer];
             CFRelease(sampleBuffer);
@@ -142,7 +142,7 @@ public:
         CVPixelBufferRelease(pixelBuffer);
     }
     
-    CMSampleBufferRef createSampleBufferFromPixelBuffer:(CVPixelBufferRef)pixelBuffer {
+    CMSampleBufferRef createSampleBufferFromPixelBuffer(CVPixelBufferRef pixelBuffer) {
         CMVideoFormatDescriptionRef formatDescription;
         OSStatus status = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pixelBuffer, &formatDescription);
         if (status != noErr) {
@@ -334,6 +334,11 @@ private:
 
 - (void)pictureInPictureController:(AVPictureInPictureController *)pictureInPictureController failedToStartPictureInPictureWithError:(NSError *)error {
     NSLog(@"❌ PiP failed to start: %@", error.localizedDescription);
+}
+
+// Helper method to get display layer for texture
+- (AVSampleBufferDisplayLayer*)getDisplayLayerForTexture:(int64_t)textureId {
+    return [_pipDisplayLayers objectForKey:@(textureId)];
 }
 
 // Helper method to cleanup PiP resources
