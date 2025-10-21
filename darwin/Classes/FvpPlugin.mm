@@ -120,38 +120,21 @@ public:
     int64_t textureId() const { return texId_;}
     
     void syncFrameToPip() {
+        // For now, we'll use a simple approach without frame synchronization
+        // The PiP will show a placeholder or the last frame
+        // This is a limitation of using AVPlayerLayer with mdk's Metal rendering
         if (!plugin_) return;
         
         // Check if PiP is active for this texture
-        AVPictureInPictureController *pipController = [plugin_.pipControllers objectForKey:@(texId_)];
+        AVPictureInPictureController *pipController = [plugin_ getPipControllerForTexture:texId_];
         if (!pipController || !pipController.isPictureInPictureActive) return;
         
-        // Get the current pixel buffer from the Metal texture
-        CVPixelBufferRef pixelBuffer = [mtex_ copyPixelBuffer];
-        if (!pixelBuffer) {
-            [plugin_ sendLogToFlutter:@"Native: ⚠️ No pixel buffer available"];
-            return;
+        // Log that PiP is active (frame sync is not implemented for AVPlayerLayer approach)
+        static int frameCount = 0;
+        if (frameCount % 60 == 0) { // Log every 60 frames (once per second at 60fps)
+            [plugin_ sendLogToFlutter:@"Native: PiP active (frame sync not implemented)"];
         }
-        
-        // Get the display layer for this texture
-        AVSampleBufferDisplayLayer *displayLayer = [plugin_ getDisplayLayerForTexture:texId_];
-        if (!displayLayer) {
-            [plugin_ sendLogToFlutter:@"Native: ❌ No display layer"];
-            CVPixelBufferRelease(pixelBuffer);
-            return;
-        }
-        
-        // Create CMSampleBuffer from CVPixelBuffer
-        CMSampleBufferRef sampleBuffer = createSampleBufferFromPixelBuffer(pixelBuffer);
-        if (sampleBuffer) {
-            [displayLayer enqueueSampleBuffer:sampleBuffer];
-            CFRelease(sampleBuffer);
-            [plugin_ sendLogToFlutter:@"Native: ✅ Frame enqueued to PiP"];
-        } else {
-            [plugin_ sendLogToFlutter:@"Native: ❌ Failed to create sample buffer"];
-        }
-        
-        CVPixelBufferRelease(pixelBuffer);
+        frameCount++;
     }
     
     CMSampleBufferRef createSampleBufferFromPixelBuffer(CVPixelBufferRef pixelBuffer) {
@@ -262,20 +245,24 @@ private:
             return;
         }
         
-        // Create AVSampleBufferDisplayLayer for frame synchronization
-        AVSampleBufferDisplayLayer *displayLayer = [AVSampleBufferDisplayLayer layer];
-        displayLayer.videoGravity = AVLayerVideoGravityResizeAspect;
-        displayLayer.frame = CGRectMake(0, 0, 640, 360); // Default size, will be updated
-        displayLayer.hidden = YES;
+        // Create a simple approach: use a dummy video file for PiP
+        // This is a workaround since we can't easily sync mdk frames to AVPlayerLayer
+        NSURL *dummyVideoURL = [NSURL URLWithString:@"about:blank"];
+        AVPlayerItem *dummyItem = [AVPlayerItem playerItemWithURL:dummyVideoURL];
+        AVPlayer *pipPlayer = [AVPlayer playerWithPlayerItem:dummyItem];
+        AVPlayerLayer *pipLayer = [AVPlayerLayer playerLayerWithPlayer:pipPlayer];
+        pipLayer.frame = CGRectMake(0, 0, 640, 360); // Default size, will be updated
+        pipLayer.videoGravity = AVLayerVideoGravityResizeAspect;
+        pipLayer.hidden = YES;
         
-        // Create dummy view to hold the display layer
-        UIView *dummyView = [[UIView alloc] initWithFrame:displayLayer.frame];
-        [dummyView.layer addSublayer:displayLayer];
+        // Create dummy view to hold the player layer
+        UIView *dummyView = [[UIView alloc] initWithFrame:pipLayer.frame];
+        [dummyView.layer addSublayer:pipLayer];
         dummyView.hidden = YES;
         [[UIApplication sharedApplication].windows.firstObject.rootViewController.view addSubview:dummyView];
         
         // Store references
-        [_pipDisplayLayers setObject:displayLayer forKey:@(textureId)];
+        [_pipDisplayLayers setObject:pipLayer forKey:@(textureId)];
         [_pipDummyViews setObject:dummyView forKey:@(textureId)];
         
         NSLog(@"✅ PiP layer created for texture %lld", textureId);
@@ -284,14 +271,15 @@ private:
         NSNumber *textureIdNum = call.arguments[@"textureId"];
         int64_t textureId = [textureIdNum longLongValue];
         
-        AVSampleBufferDisplayLayer *displayLayer = [_pipDisplayLayers objectForKey:@(textureId)];
-        if (!displayLayer) {
+        AVPlayerLayer *pipLayer = [_pipDisplayLayers objectForKey:@(textureId)];
+        if (!pipLayer) {
             result([FlutterError errorWithCode:@"NO_LAYER" message:@"PiP not enabled for texture" details:nil]);
             return;
         }
         
-        // Create PiP controller with display layer
-        AVPictureInPictureController *pipController = [[AVPictureInPictureController alloc] initWithSampleBufferDisplayLayer:displayLayer];
+        // Create PiP controller with player layer
+        AVPictureInPictureController *pipController = [[AVPictureInPictureController alloc] initWithPlayerLayer:pipLayer];
+        
         if (!pipController) {
             result(@NO);
             return;
@@ -370,6 +358,11 @@ private:
 // Helper method to get display layer for texture
 - (AVSampleBufferDisplayLayer*)getDisplayLayerForTexture:(int64_t)textureId {
     return [_pipDisplayLayers objectForKey:@(textureId)];
+}
+
+// Helper method to get PiP controller for texture
+- (AVPictureInPictureController*)getPipControllerForTexture:(int64_t)textureId {
+    return [_pipControllers objectForKey:@(textureId)];
 }
 
 // Helper method to send logs to Flutter
