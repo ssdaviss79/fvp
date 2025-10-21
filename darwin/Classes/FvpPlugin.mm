@@ -270,6 +270,12 @@ private:
         result(@YES);
     } else if ([call.method isEqualToString:@"enterPipMode"]) {
         NSLog(@"🔧 PiP: enterPipMode called");
+        NSLog(@"🔧 PiP: Method call received in native code");
+        
+        // Get parameters from Flutter
+        NSNumber *widthNum = call.arguments[@"width"];
+        NSNumber *heightNum = call.arguments[@"height"];
+        NSLog(@"🔧 PiP: Received width: %@, height: %@", widthNum, heightNum);
         
         // Use global PiP layer (key 0)
         AVPlayerLayer *pipLayer = [_pipLayers objectForKey:@(0)];
