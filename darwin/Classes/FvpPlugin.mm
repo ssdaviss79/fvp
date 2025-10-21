@@ -119,22 +119,27 @@ public:
 
     int64_t textureId() const { return texId_;}
     
-    void syncFrameToPip() {
-        // For now, we'll use a simple approach without frame synchronization
-        // The PiP will show a placeholder or the last frame
-        // This is a limitation of using AVPlayerLayer with mdk's Metal rendering
-        if (!plugin_) return;
-        
-        // Check if PiP is active for this texture
-        AVPictureInPictureController *pipController = [plugin_ getPipControllerForTexture:texId_];
-        if (!pipController || !pipController.isPictureInPictureActive) return;
-        
-        // Log that PiP is active (frame sync is not implemented for AVPlayerLayer approach)
-        static int frameCount = 0;
-        if (frameCount % 60 == 0) { // Log every 60 frames (once per second at 60fps)
-            [plugin_ sendLogToFlutter:@"Native: PiP active (frame sync not implemented)"];
+    void TexturePlayer::syncFrameToPip() {
+        if (!plugin_ || ![plugin_ getPipControllerForTexture:texId_].isPictureInPictureActive) return;
+        CVPixelBufferRef pixelBuffer = [mtex_ copyPixelBuffer];
+        if (!pixelBuffer) {
+            [plugin_ sendLogToFlutter:@"Native: ⚠️ No pixel buffer"];
+            return;
         }
-        frameCount++;
+        CMSampleBufferRef sampleBuffer = createSampleBufferFromPixelBuffer(pixelBuffer);
+        if (sampleBuffer) {
+            AVSampleBufferDisplayLayer *displayLayer = [plugin_ getDisplayLayerForTexture:texId_];
+            if (displayLayer) {
+                [displayLayer enqueue:sampleBuffer];
+                [self sendLogToFlutter:@"Native: ✅ Frame enqueued to PiP"];
+            } else {
+                [self sendLogToFlutter:@"Native: ❌ No display layer"];
+            }
+            CFRelease(sampleBuffer);
+        } else {
+            [self sendLogToFlutter:@"Native: ❌ Failed to create sample buffer"];
+        }
+        CVPixelBufferRelease(pixelBuffer);
     }
     
     CMSampleBufferRef createSampleBufferFromPixelBuffer(CVPixelBufferRef pixelBuffer) {
@@ -172,6 +177,7 @@ private:
 @property(strong, nonatomic) NSMutableDictionary<NSNumber*, AVPictureInPictureController*>* pipControllers;
 @property(strong, nonatomic) NSMutableDictionary<NSNumber*, AVPlayerLayer*>* pipLayers;
 @property(strong, nonatomic) NSMutableDictionary<NSNumber*, UIView*>* pipDummyViews;
+@property(strong, nonatomic) FlutterMethodChannel* channel; // Add this
 @end
 
 @implementation FvpPlugin
@@ -205,6 +211,7 @@ private:
     _pipControllers = [NSMutableDictionary dictionary];
     _pipLayers = [NSMutableDictionary dictionary];
     _pipDummyViews = [NSMutableDictionary dictionary];
+    _channel = [FlutterMethodChannel methodChannelWithName:@"fvp" binaryMessenger:[registrar messenger]]; // Initialize
     return self;
 }
 
@@ -234,100 +241,66 @@ private:
         }
 #endif
         result(nil);
-    } else if ([call.method isEqualToString:@"enablePipForTexture"]) {
-        NSLog(@"🔧 PiP: enablePipForTexture called");
-        
-        // Check if PiP is supported
+    else if ([call.method isEqualToString:@"enablePipForTexture"]) {
+        [self sendLogToFlutter:@"🔧 PiP: enablePipForTexture called"];
         if (![AVPictureInPictureController isPictureInPictureSupported]) {
-            NSLog(@"❌ PiP: Picture-in-Picture not supported on this device");
+            [self sendLogToFlutter:@"❌ PiP: Picture-in-Picture not supported"];
             result([FlutterError errorWithCode:@"NOT_SUPPORTED" message:@"PiP not supported" details:nil]);
             return;
         }
-        
-        NSLog(@"✅ PiP: Picture-in-Picture is supported");
-        
-        // Create a simple approach: use a dummy video file for PiP
-        // This is a workaround since we can't easily sync mdk frames to AVPlayerLayer
-        NSURL *dummyVideoURL = [NSURL URLWithString:@"about:blank"];
-        AVPlayerItem *dummyItem = [AVPlayerItem playerItemWithURL:dummyVideoURL];
-        AVPlayer *pipPlayer = [AVPlayer playerWithPlayerItem:dummyItem];
-        AVPlayerLayer *pipLayer = [AVPlayerLayer playerLayerWithPlayer:pipPlayer];
-        pipLayer.frame = CGRectMake(0, 0, 640, 360); // Default size, will be updated
-        pipLayer.videoGravity = AVLayerVideoGravityResizeAspect;
-        pipLayer.hidden = YES;
-        
-        // Create dummy view to hold the player layer
-        UIView *dummyView = [[UIView alloc] initWithFrame:pipLayer.frame];
-        [dummyView.layer addSublayer:pipLayer];
+        NSNumber *textureIdNum = call.arguments[@"textureId"];
+        int64_t textureId = [textureIdNum longLongValue];
+        auto it = players.find(textureId);
+        if (it == players.end()) {
+            [self sendLogToFlutter:@"❌ PiP: Texture not found"];
+            result([FlutterError errorWithCode:@"NO_TEXTURE" message:@"Texture not found" details:nil]);
+            return;
+        }
+        auto texPlayer = it->second;
+        int width = texPlayer->width();
+        int height = texPlayer->height();
+        AVSampleBufferDisplayLayer *displayLayer = [AVSampleBufferDisplayLayer layer];
+        displayLayer.videoGravity = AVLayerVideoGravityResizeAspect;
+        displayLayer.frame = CGRectMake(0, 0, width, height);
+        displayLayer.hidden = YES;
+        UIView *dummyView = [[UIView alloc] initWithFrame:displayLayer.frame];
+        [dummyView.layer addSublayer:displayLayer];
         dummyView.hidden = YES;
         [[UIApplication sharedApplication].windows.firstObject.rootViewController.view addSubview:dummyView];
-        
-        // Store references using a simple key (0 for global PiP)
-        [_pipLayers setObject:pipLayer forKey:@(0)];
-        [_pipDummyViews setObject:dummyView forKey:@(0)];
-        
-        NSLog(@"✅ PiP layer created for global PiP");
+        [_pipLayers setObject:displayLayer forKey:@(textureId)];
+        [_pipDummyViews setObject:dummyView forKey:@(textureId)];
+        [self sendLogToFlutter:@"✅ PiP: Created display layer for texture"];
         result(@YES);
     } else if ([call.method isEqualToString:@"enterPipMode"]) {
-        NSLog(@"🔧 PiP: enterPipMode called");
-        NSLog(@"🔧 PiP: Method call received in native code");
-        NSLog(@"🚨🚨🚨 NATIVE METHOD CALLED 🚨🚨🚨");
-        print("🔧 PiP: enterPipMode called");
-        print("🔧 PiP: Method call received in native code");
-        print("🚨🚨🚨 NATIVE METHOD CALLED 🚨🚨🚨");
-        
-        // Get parameters from Flutter
-        NSNumber *widthNum = call.arguments[@"width"];
-        NSNumber *heightNum = call.arguments[@"height"];
-        NSLog(@"🔧 PiP: Received width: %@, height: %@", widthNum, heightNum);
-        
-        // Use global PiP layer (key 0)
-        AVPlayerLayer *pipLayer = [_pipLayers objectForKey:@(0)];
-        if (!pipLayer) {
-            NSLog(@"❌ PiP: No layer found for global PiP");
+        [self sendLogToFlutter:[NSString stringWithFormat:@"🔧 PiP: enterPipMode called - textureId: %lld, size: %@x%@", textureId, call.arguments[@"width"], call.arguments[@"height"]]];
+        NSNumber *textureIdNum = call.arguments[@"textureId"];
+        int64_t textureId = [textureIdNum longLongValue];
+        AVSampleBufferDisplayLayer *displayLayer = [_pipLayers objectForKey:@(textureId)];
+        if (!displayLayer) {
+            [self sendLogToFlutter:@"❌ PiP: No display layer"];
             result([FlutterError errorWithCode:@"NO_LAYER" message:@"PiP not enabled" details:nil]);
             return;
         }
-        
-        NSLog(@"✅ PiP: Found layer for global PiP");
-        
-        // Check if PiP is already active
-        AVPictureInPictureController *existingController = [_pipControllers objectForKey:@(0)];
-        if (existingController && existingController.isPictureInPictureActive) {
-            NSLog(@"⚠️ PiP: Already active, stopping first");
-            [existingController stopPictureInPicture];
-        }
-        
-        // Create PiP controller with player layer
-        AVPictureInPictureController *pipController = [[AVPictureInPictureController alloc] initWithPlayerLayer:pipLayer];
-        
+        AVPictureInPictureController *pipController = [[AVPictureInPictureController alloc] initWithSampleBufferDisplayLayer:displayLayer];
         if (!pipController) {
-            NSLog(@"❌ PiP: Failed to create AVPictureInPictureController");
+            [self sendLogToFlutter:@"❌ PiP: Failed to create AVPictureInPictureController"];
             result(@NO);
             return;
         }
-        
-        NSLog(@"✅ PiP: Created AVPictureInPictureController");
-        
         pipController.delegate = self;
         if (@available(iOS 14.2, *)) {
             pipController.canStartPictureInPictureAutomaticallyFromInline = YES;
+            [self sendLogToFlutter:@"✅ PiP: Auto-PiP enabled"];
         }
-        
-        [_pipControllers setObject:pipController forKey:@(0)];
-        
-        NSLog(@"🔧 PiP: Starting Picture-in-Picture...");
-        [pipController startPictureInPicture];
-        
-        NSLog(@"✅ PiP: startPictureInPicture called for global PiP");
-        
-        // Add a delay to check if PiP actually started
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            NSLog(@"🔧 PiP: Checking PiP status after 1 second...");
-            NSLog(@"🔧 PiP: Is PiP active: %@", pipController.isPictureInPictureActive ? @"YES" : @"NO");
-        });
-        
-        result(@YES);
+        [_pipControllers setObject:pipController forKey:@(textureId)];
+        if (pipController.isPictureInPicturePossible) {
+            [pipController startPictureInPicture];
+            [self sendLogToFlutter:@"✅ PiP: Started Picture-in-Picture"];
+            result(@YES);
+        } else {
+            [self sendLogToFlutter:@"❌ PiP: Not possible"];
+            result(@NO);
+        }
     } else if ([call.method isEqualToString:@"exitPipMode"]) {
         NSLog(@"🔧 PiP: exitPipMode called");
         
@@ -350,6 +323,7 @@ private:
 // AVPictureInPictureControllerDelegate methods
 - (void)pictureInPictureControllerWillStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
     NSLog(@"🔄 PiP will start");
+    [self sendLogToFlutter:@"🔄 PiP will start"];
 }
 
 - (void)pictureInPictureControllerDidStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
@@ -360,6 +334,7 @@ private:
 
 - (void)pictureInPictureControllerWillStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
     NSLog(@"🔄 PiP will stop");
+    [self sendLogToFlutter:@"🔄 PiP will stop"];
 }
 
 - (void)pictureInPictureControllerDidStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
@@ -405,7 +380,7 @@ private:
 // Helper method to send logs to Flutter
 - (void)sendLogToFlutter:(NSString*)message {
     NSLog(@"%@", message);
-    // Could add Flutter channel call here if needed
+    [self.channel invokeMethod:@"nativeLog" arguments:message error:nil];
 }
 
 // Helper method to cleanup PiP resources
