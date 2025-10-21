@@ -8,20 +8,16 @@
 #include "mdk/RenderAPI.h"
 #include "mdk/Player.h"
 #import <AVFoundation/AVFoundation.h>
-#import <AVKit/AVKit.h>
 #import <CoreVideo/CoreVideo.h>
 #import <Metal/Metal.h>
 #include <mutex>
 #include <unordered_map>
 #include <iostream>
+#include <libavutil/frame.h> // For AVFrame conversion
+#include <libavutil/imgutils.h> // For frame copy
 
 using namespace mdk;
 using namespace std;
-
-@interface FvpPipController ()
-@property (nonatomic, strong) AVPlayerLayer *pipLayer;  // private
-@property (nonatomic, strong) AVPlayer *pipPlayer;      // private
-@end
 
 @interface MetalTexture : NSObject<FlutterTexture>
 @end
@@ -34,10 +30,11 @@ using namespace std;
     CVPixelBufferRef pixbuf;
     id<MTLTexture> fltex;
     CVMetalTextureCacheRef texCache;
-    mutex mtx;
+    mutex mtx; // ensure whole frame render pass commands are recorded before blitting
 }
 
-- (instancetype)initWithWidth:(int)width height:(int)height {
+- (instancetype)initWithWidth:(int)width height:(int)height
+{
     self = [super init];
     device = MTLCreateSystemDefaultDevice();
     cmdQueue = [device newCommandQueue];
@@ -67,24 +64,24 @@ using namespace std;
 
 - (void)dealloc {
     CVPixelBufferRelease(pixbuf);
-    if (texCache) CFRelease(texCache);
+    if (texCache)
+        CFRelease(texCache);
 }
 
 - (CVPixelBufferRef _Nullable)copyPixelBuffer {
     scoped_lock lock(mtx);
     auto cmdbuf = [cmdQueue commandBuffer];
     auto blit = [cmdbuf blitCommandEncoder];
-    [blit copyFromTexture:texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) 
-              sourceSize:MTLSizeMake(texture.width, texture.height, texture.depth)
-           toTexture:fltex destinationSlice:0 destinationLevel:0 
-        destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [blit copyFromTexture:texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(texture.width, texture.height, texture.depth)
+        toTexture:fltex destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
     [blit endEncoding];
     [cmdbuf commit];
     return CVPixelBufferRetain(pixbuf);
 }
 @end
 
-class TexturePlayer final: public Player {
+class TexturePlayer final: public Player
+{
 public:
     TexturePlayer(int64_t handle, int width, int height, NSObject<FlutterTextureRegistry>* texReg)
         : Player(reinterpret_cast<mdkPlayerAPI*>(handle))
@@ -97,6 +94,7 @@ public:
         ra.texture = (__bridge void*)mtex_->texture;
         setRenderAPI(&ra);
         setVideoSurfaceSize(width, height);
+
         setRenderCallback([this, texReg](void* opaque){
             scoped_lock lock(mtex_->mtx);
             renderVideo();
@@ -109,7 +107,7 @@ public:
         setVideoSurfaceSize(-1, -1);
     }
 
-    int64_t textureId() const { return texId_; }
+    int64_t textureId() const { return texId_;}
 private:
     int64_t texId_ = 0;
     MetalTexture* mtex_ = nil;
@@ -117,45 +115,15 @@ private:
 
 @interface FvpPlugin () {
     unordered_map<int64_t, shared_ptr<TexturePlayer>> players;
+    NSMutableDictionary<NSNumber*, AVPictureInPictureController*> *pipControllers;
+    NSMutableDictionary<NSNumber*, AVSampleBufferDisplayLayer*> *displayLayers;
+    NSMutableDictionary<NSNumber*, UIView*> *dummyViews;
 }
-@end
-
-@implementation FvpPipController
-- (void)pictureInPictureControllerDidStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
-    if (self.channel) {
-        [self.channel invokeMethod:@"onPipStateChanged" arguments:@YES];
-    }
-}
-
-- (void)pictureInPictureControllerDidStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
-    if (self.channel) {
-        [self.channel invokeMethod:@"onPipStateChanged" arguments:@NO];
-    }
-}
-
-- (void)pictureInPictureController:(AVPictureInPictureController *)pictureInPictureController 
-    failedToStartPictureInPictureWithError:(NSError *)error {
-    if (self.channel) {
-        [self.channel invokeMethod:@"onPipError" arguments:error.localizedDescription];
-    }
-}
-
-- (void)pictureInPictureControllerWillStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
-    // Pre-start logic
-}
-
-- (void)pictureInPictureControllerWillStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
-    // Pre-stop logic
-}
-
-- (void)pictureInPictureController:(AVPictureInPictureController *)pictureInPictureController 
-    restoreUserInterfaceForPictureInPictureStopWithCompletionHandler:(void (^)(BOOL))completionHandler {
-    completionHandler(YES);
-}
+@property(readonly, strong, nonatomic) NSObject<FlutterTextureRegistry>* texRegistry;
+@property(readonly, strong, nonatomic) FlutterMethodChannel* channel;
 @end
 
 @implementation FvpPlugin
-
 + (void)registerWithRegistrar:(NSObject<FlutterPluginRegistrar>*)registrar {
 #if TARGET_OS_OSX
     auto messenger = registrar.messenger;
@@ -177,11 +145,20 @@ private:
 
 - (instancetype)initWithRegistrar:(NSObject<FlutterPluginRegistrar>*)registrar {
     self = [super init];
-    if (self) {
-        _texRegistry = [registrar textures];
-        _pipControllers = [NSMutableDictionary dictionary];
-    }
+#if TARGET_OS_OSX
+    _texRegistry = registrar.textures;
+#else
+    _texRegistry = [registrar textures];
+#endif
+    _channel = [FlutterMethodChannel methodChannelWithName:@"fvp" binaryMessenger:[registrar messenger]];
+    pipControllers = [NSMutableDictionary new];
+    displayLayers = [NSMutableDictionary new];
+    dummyViews = [NSMutableDictionary new];
     return self;
+}
+
+- (void)sendLog:(NSString*)message {
+    [_channel invokeMethod:@"nativeLog" arguments:message];
 }
 
 - (void)handleMethodCall:(FlutterMethodCall*)call result:(FlutterResult)result {
@@ -196,11 +173,14 @@ private:
         const auto texId = ((NSNumber*)call.arguments[@"texture"]).longLongValue;
         [_texRegistry unregisterTexture:texId];
         players.erase(texId);
-        [_pipControllers removeObjectForKey:@(texId)];
+        [pipControllers removeObjectForKey:@(texId)];
+        [displayLayers removeObjectForKey:@(texId)];
+        [dummyViews[@(texId)] removeFromSuperview];
         result(nil);
     } else if ([call.method isEqualToString:@"MixWithOthers"]) {
         [[maybe_unused]] const auto value = ((NSNumber*)call.arguments[@"value"]).boolValue;
-#if !TARGET_OS_OSX
+#if TARGET_OS_OSX
+#else
         if (value) {
             [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback withOptions:AVAudioSessionCategoryOptionMixWithOthers error:nil];
         } else {
@@ -208,148 +188,194 @@ private:
         }
 #endif
         result(nil);
-    } else if (@available(iOS 14.0, *)) {
-        if ([call.method isEqualToString:@"isPipSupported"]) {
-            BOOL supported = [AVPictureInPictureController isPictureInPictureSupported];
-            [self.channel invokeMethod:@"nativeLog" arguments:[NSString stringWithFormat:@"Native: PiP supported: %d", supported]];
-            result(@(supported));
-        } else if ([call.method isEqualToString:@"getTextureId"]) {
-            if (players.empty()) {
-                result(@(-1LL));
-                return;
+    } else if ([call.method isEqualToString:@"isPipSupported"]) {
+        bool isSupported = NO;
+#if !TARGET_OS_OSX
+        if (@available(iOS 14.0, *)) {
+            isSupported = [AVPictureInPictureController isPictureInPictureSupported];
+        }
+#endif
+        [self sendLog:[NSString stringWithFormat:@"Native: PiP supported: %d", isSupported]];
+        result(@(isSupported));
+    } else if ([call.method isEqualToString:@"enablePiP"]) {
+        NSDictionary *args = call.arguments;
+        NSNumber *textureIdNum = args[@"textureId"];
+        if (!textureIdNum) {
+            [self sendLog:@"Native: ❌ Missing textureId for enablePiP"];
+            result([FlutterError errorWithCode:@"INVALID_ARGS" message:@"Missing textureId" details:nil]);
+            return;
+        }
+        int64_t textureId = [textureIdNum longLongValue];
+        auto it = players.find(textureId);
+        if (it == players.end()) {
+            [self sendLog:[NSString stringWithFormat:@"Native: ❌ No player for texture %lld", textureId]];
+            result(@NO);
+            return;
+        }
+        shared_ptr<TexturePlayer> texPlayer = it->second;
+        [self sendLog:[NSString stringWithFormat:@"Native: Found player for texture %lld", textureId]];
+        
+        // Setup AVSampleBufferDisplayLayer for PiP
+        AVSampleBufferDisplayLayer *displayLayer = [AVSampleBufferDisplayLayer new];
+        displayLayer.bounds = CGRectMake(0, 0, texPlayer->videoWidth(), texPlayer->videoHeight());
+        displayLayer.position = CGPointMake(CGRectGetMidX(displayLayer.bounds), CGRectGetMidY(displayLayer.bounds));
+        displayLayer.videoGravity = AVLayerVideoGravityResizeAspect;
+        
+        // Hidden dummy view
+        UIView *dummyView = [[UIView alloc] initWithFrame:displayLayer.bounds];
+        dummyView.hidden = YES;
+        [dummyView.layer addSublayer:displayLayer];
+        [[UIApplication sharedApplication].keyWindow.rootViewController.view addSubview:dummyView];
+        
+        // Store for cleanup
+        displayLayers[@(textureId)] = displayLayer;
+        dummyViews[@(textureId)] = dummyView;
+        
+        // Bridge FFmpeg frames to CMSampleBuffer
+        __weak typeof(self) weakSelf = self;
+        texPlayer->setRenderCallback([weakSelf, displayLayer, textureId](void* opaque) {
+            // Get AVFrame from mdk::Player
+            MediaInfo info;
+            uint8_t* frameData[8] = {NULL};
+            int linesize[8] = {0};
+            texPlayer->getVideoFrame(&frameData[0], &linesize[0], &info); // Adapt from mdk API
+            
+            // Convert to CVPixelBuffer (simplified; assumes RGBA/BGRA)
+            CVPixelBufferRef pixelBuffer;
+            CVPixelBufferCreate(kCFAllocatorDefault, info.video[0].width, info.video[0].height, kCVPixelFormatType_32BGRA, NULL, &pixelBuffer);
+            CVPixelBufferLockBaseAddress(pixelBuffer, 0);
+            uint8_t *dst = (uint8_t*)CVPixelBufferGetBaseAddress(pixelBuffer);
+            size_t dstStride = CVPixelBufferGetBytesPerRow(pixelBuffer);
+            for (int h = 0; h < info.video[0].height; h++) {
+                memcpy(dst + h * dstStride, frameData[0] + h * linesize[0], linesize[0]);
             }
-            auto it = players.begin();
-            result(@(it->first));
-        } else if ([call.method isEqualToString:@"enablePiP"]) {
-            NSNumber *texIdNum = call.arguments[@"textureId"];
-            if (!texIdNum) {
-                result([FlutterError errorWithCode:@"INVALID_ARGS" message:@"Missing textureId" details:nil]);
-                return;
-            }
-            int64_t texId = [texIdNum longLongValue];
-            BOOL success = [self enablePipForTexture:texId];
-            result(@(success));
-        } else if ([call.method isEqualToString:@"enterPipMode"]) {
-            NSDictionary *args = call.arguments;
-            NSNumber *texIdNum = args[@"textureId"];
-            NSNumber *widthNum = args[@"width"];
-            NSNumber *heightNum = args[@"height"];
-            if (!texIdNum || !widthNum || !heightNum) {
-                result([FlutterError errorWithCode:@"INVALID_ARGS" message:@"Missing args" details:nil]);
-                return;
-            }
-            int64_t texId = [texIdNum longLongValue];
-            int width = [widthNum intValue];
-            int height = [heightNum intValue];
-            BOOL success = [self enterPipModeForTexture:texId width:width height:height];
-            result(@(success));
-        } else if ([call.method isEqualToString:@"exitPipMode"]) {
-            for (NSNumber *key in _pipControllers) {
-                FvpPipController *ctrl = _pipControllers[key];
-                if (ctrl.pipController.isPictureInPictureActive) {
-                    [ctrl.pipController stopPictureInPicture];
-                    break;
-                }
-            }
+            CVPixelBufferUnlockBaseAddress(pixelBuffer, 0);
+            
+            // Create CMSampleBuffer
+            CMSampleTimingInfo timingInfo = {kCMTimeInvalid, kCMTimeInvalid, kCMTimeInvalid};
+            CMVideoFormatDescriptionRef formatDesc;
+            CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pixelBuffer, &formatDesc);
+            CMSampleBufferRef sampleBuffer;
+            CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault, pixelBuffer, YES, NULL, NULL, formatDesc, &timingInfo, &sampleBuffer);
+            CFRelease(formatDesc);
+            
+            // Enqueue
+            [displayLayer enqueueSampleBuffer:sampleBuffer];
+            CFRelease(sampleBuffer);
+            CVPixelBufferRelease(pixelBuffer);
+            
+            [weakSelf sendLog:@"Native: Enqueued frame to AVSampleBufferDisplayLayer"];
+        });
+        
+        // Create PiP controller
+        AVPictureInPictureControllerContentSource *source = [[AVPictureInPictureControllerContentSource alloc] initWithSampleBufferDisplayLayer:displayLayer placeholderImage:nil];
+        AVPictureInPictureController *pipController = [[AVPictureInPictureController alloc] initWithContentSource:source];
+        if (!pipController) {
+            [self sendLog:@"Native: ❌ Failed to create PiP controller"];
+            result(@NO);
+            return;
+        }
+        pipController.delegate = self;
+        if (@available(iOS 14.2, *)) {
+            pipController.canStartPictureInPictureAutomaticallyFromInline = YES;
+            [self sendLog:@"Native: Automatic PiP enabled"];
+        }
+        pipControllers[@(textureId)] = pipController;
+        [self sendLog:[NSString stringWithFormat:@"Native: ✅ PiP enabled for texture %lld", textureId]];
+        result(@YES);
+    } else if ([call.method isEqualToString:@"enterPipMode"]) {
+        NSDictionary *args = call.arguments;
+        NSNumber *textureIdNum = args[@"textureId"];
+        int64_t textureId = [textureIdNum longLongValue];
+        
+        AVPictureInPictureController *pipController = pipControllers[@(textureId)];
+        if (pipController && pipController.isPictureInPicturePossible) {
+            [self sendLog:@"Native: ✅ Starting PiP"];
+            [pipController startPictureInPicture];
             result(@YES);
         } else {
-            result(FlutterMethodNotImplemented);
+            [self sendLog:[NSString stringWithFormat:@"Native: ❌ Cannot start PiP for texture %lld", textureId]];
+            result(@NO);
         }
+    } else if ([call.method isEqualToString:@"exitPipMode"]) {
+        NSDictionary *args = call.arguments;
+        NSNumber *textureIdNum = args[@"textureId"];
+        int64_t textureId = [textureIdNum longLongValue];
+        
+        AVPictureInPictureController *pipController = pipControllers[@(textureId)];
+        if (pipController && pipController.isPictureInPictureActive) {
+            [self sendLog:@"Native: Stopping PiP"];
+            [pipController stopPictureInPicture];
+        }
+        [self sendLog:[NSString stringWithFormat:@"Native: ✅ PiP exited for texture %lld", textureId]];
+        result(@YES);
     } else {
         result(FlutterMethodNotImplemented);
     }
 }
 
-- (BOOL)enablePipForTexture:(int64_t)texId {
-    auto it = players.find(texId);
-    if (it == players.end()) {
-        [self.channel invokeMethod:@"nativeLog" arguments:@"Native: No TexturePlayer for textureId"];
-        return NO;
-    }
-    shared_ptr<TexturePlayer> player = it->second;
-
-    // Create AVPlayer with placeholder asset (will be replaced with frames)
-    AVPlayer *avPlayer = [[AVPlayer alloc] init];
-    
-    // Create hidden AVPlayerLayer
-    AVPlayerLayer *pipLayer = [AVPlayerLayer playerLayerWithPlayer:avPlayer];
-    pipLayer.videoGravity = AVLayerVideoGravityResizeAspect;
-    pipLayer.frame = CGRectMake(0, 0, 1, 1);
-    
-    // Create dummy view to keep layer alive
-    UIView *dummyView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1, 1)];
-    dummyView.hidden = YES;
-    [dummyView.layer addSublayer:pipLayer];
-    if ([UIApplication sharedApplication].windows.count > 0) {
-        UIWindow *window = [UIApplication sharedApplication].windows[0];
-        if (window.rootViewController.view) {
-            [window.rootViewController.view addSubview:dummyView];
-        }
-    }
-    
-    // Create PiP controller
-    AVPictureInPictureController *pipCtrl = [[AVPictureInPictureController alloc] initWithPlayerLayer:pipLayer];
-    if (!pipCtrl) {
-        [self.channel invokeMethod:@"nativeLog" arguments:@"Native: Failed to create AVPictureInPictureController"];
-        return NO;
-    }
-    
-    // Setup FvpPipController
-    FvpPipController *controller = [[FvpPipController alloc] init];
-    controller.pipController = pipCtrl;
-    controller.pipLayer = pipLayer;
-    controller.textureId = texId;
-    controller.channel = self.channel;
-    controller.pipPlayer = avPlayer;  // Store for frame feeding
-    pipCtrl.delegate = controller;
-    
-    if (@available(iOS 14.2, *)) {
-        pipCtrl.canStartPictureInPictureAutomaticallyFromInline = YES;
-        [self.channel invokeMethod:@"nativeLog" arguments:@"Native: Auto PiP enabled"];
-    }
-    
-    _pipControllers[@(texId)] = controller;
-    
-    // Configure audio session
-    NSError *error = nil;
-    [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback 
-                                    withOptions:AVAudioSessionCategoryOptionMixWithOthers 
-                                          error:&error];
-    if (error) {
-        [self.channel invokeMethod:@"nativeLog" arguments:[NSString stringWithFormat:@"Native: Audio session error: %@", error.localizedDescription]];
-    } else {
-        [[AVAudioSession sharedInstance] setActive:YES error:&error];
-        if (error) {
-            [self.channel invokeMethod:@"nativeLog" arguments:[NSString stringWithFormat:@"Native: Audio session activation error: %@", error.localizedDescription]];
-        } else {
-            [self.channel invokeMethod:@"nativeLog" arguments:@"Native: Audio session configured"];
-        }
-    }
-    
-    // Placeholder for FFmpeg frame bridge (requires mdk API exposure)
-    [self.channel invokeMethod:@"nativeLog" arguments:@"Native: PiP enabled for texture"];
-    return YES;
-}
-
-- (BOOL)enterPipModeForTexture:(int64_t)texId width:(int)width height:(int)height {
-    FvpPipController *pipCtrl = _pipControllers[@(texId)];
-    if (!pipCtrl || !pipCtrl.pipController) {
-        [self.channel invokeMethod:@"nativeLog" arguments:@"Native: No PiP controller"];
-        return NO;
-    }
-    
-    if (pipCtrl.pipController.isPictureInPicturePossible) {
-        [pipCtrl.pipController startPictureInPicture];
-        [self.channel invokeMethod:@"nativeLog" arguments:@"Native: Started PiP"];
-        return YES;
-    }
-    [self.channel invokeMethod:@"nativeLog" arguments:@"Native: PiP not possible"];
-    return NO;
-}
-
 - (void)detachFromEngineForRegistrar:(NSObject<FlutterPluginRegistrar> *)registrar {
     players.clear();
-    [_pipControllers removeAllObjects];
+    [pipControllers removeAllObjects];
+    [displayLayers removeAllObjects];
+    for (UIView *view in [dummyViews allValues]) {
+        [view removeFromSuperview];
+    }
+}
+
+#if TARGET_OS_OSX
+#else
+- (void)applicationWillTerminate:(UIApplication *)application {
+    players.clear();
+    [pipControllers removeAllObjects];
+    [displayLayers removeAllObjects];
+    for (UIView *view in [dummyViews allValues]) {
+        [view removeFromSuperview];
+    }
+}
+#endif
+
+// MARK: - AVPictureInPictureControllerDelegate
+- (void)pictureInPictureControllerWillStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
+    [self sendLog:@"Native: PiP will start"];
+    NSError *error = nil;
+    [[AVAudioSession sharedInstance] setActive:YES error:&error];
+    if (error) {
+        [self sendLog:[NSString stringWithFormat:@"Native: Failed to activate audio session: %@", error.localizedDescription]];
+    }
+}
+
+- (void)pictureInPictureControllerDidStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
+    [self sendLog:@"Native: ✅ PiP did start"];
+    [_channel invokeMethod:@"onPipStateChanged" arguments:@YES];
+}
+
+- (void)pictureInPictureController:(AVPictureInPictureController *)pictureInPictureController failedToStartPictureInPictureWithError:(NSError *)error {
+    [self sendLog:[NSString stringWithFormat:@"Native: ❌ PiP failed to start: %@", error.localizedDescription]];
+    if (error.code == -1001) {
+        [self sendLog:@"Native: Error - PiP already active in another app"];
+    } else if (error.code == -1002) {
+        [self sendLog:@"Native: Error - PiP disabled in Settings"];
+    }
+}
+
+- (void)pictureInPictureControllerWillStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
+    [self sendLog:@"Native: PiP will stop"];
+}
+
+- (void)pictureInPictureControllerDidStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
+    [self sendLog:@"Native: ✅ PiP did stop"];
+    [_channel invokeMethod:@"onPipStateChanged" arguments:@NO];
+}
+
+- (void)pictureInPictureController:(AVPictureInPictureController *)pictureInPictureController restoreUserInterfaceForPictureInPictureStopWithCompletionHandler:(void (^)(BOOL))completionHandler {
+    [self sendLog:@"Native: Restore UI for PiP stop"];
+    NSError *error = nil;
+    [[AVAudioSession sharedInstance] setActive:YES error:&error];
+    if (error) {
+        [self sendLog:[NSString stringWithFormat:@"Native: Failed to reactivate audio session: %@", error.localizedDescription]];
+    }
+    completionHandler(YES);
 }
 
 @end
