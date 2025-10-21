@@ -4,7 +4,7 @@
 #import <FlutterMacOS/FlutterMacOS.h>
 #endif
 #import <AVFoundation/AVFoundation.h>
-#import <AVKit/AVKit.h>
+// #import <AVKit/AVKit.h>
 #import <CoreMedia/CoreMedia.h>
 
 @interface FvpPlugin : NSObject<FlutterPlugin, AVPictureInPictureControllerDelegate>
