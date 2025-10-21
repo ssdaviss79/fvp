@@ -15,7 +15,7 @@ Flutter video player plugin.
   s.author           = { 'Wang Bin' => 'wbsecg1@gmail.com' }
 
   s.compiler_flags   = '-Wno-documentation', '-std=c++20'
-  s.frameworks       = 'AVFoundation'
+  s.frameworks       = 'AVFoundation', 'CoreMedia', 'VideoToolbox'
   s.ios.frameworks   = 'AVKit'
   s.osx.frameworks    = 'FlutterMacOS'
   #s.osx.pod_target_xcconfig  =  { 'OTHER_LDFLAGS'  =>  '-framework FlutterMacOS'  }
