@@ -235,63 +235,112 @@ private:
 #endif
         result(nil);
     } else if ([call.method isEqualToString:@"enablePipForTexture"]) {
-        // Use a simple approach without textureId dependency
-        // Create a global PiP setup that works with any video
+        NSLog(@"🔧 PiP: enablePipForTexture called");
+        
+        // Check if PiP is supported
+        if (![AVPictureInPictureController isPictureInPictureSupported]) {
+            NSLog(@"❌ PiP: Picture-in-Picture not supported on this device");
+            result([FlutterError errorWithCode:@"NOT_SUPPORTED" message:@"PiP not supported" details:nil]);
+            return;
+        }
+        
+        NSLog(@"✅ PiP: Picture-in-Picture is supported");
         
         // Create a simple approach: use a dummy video file for PiP
         // This is a workaround since we can't easily sync mdk frames to AVPlayerLayer
         NSURL *dummyVideoURL = [NSURL URLWithString:@"about:blank"];
+        NSLog(@"🔧 PiP: Creating dummy video URL: %@", dummyVideoURL);
+        
         AVPlayerItem *dummyItem = [AVPlayerItem playerItemWithURL:dummyVideoURL];
+        NSLog(@"🔧 PiP: Created dummy player item: %@", dummyItem);
+        
         AVPlayer *pipPlayer = [AVPlayer playerWithPlayerItem:dummyItem];
+        NSLog(@"🔧 PiP: Created pip player: %@", pipPlayer);
+        
         AVPlayerLayer *pipLayer = [AVPlayerLayer playerLayerWithPlayer:pipPlayer];
         pipLayer.frame = CGRectMake(0, 0, 640, 360); // Default size, will be updated
         pipLayer.videoGravity = AVLayerVideoGravityResizeAspect;
         pipLayer.hidden = YES;
+        NSLog(@"🔧 PiP: Created player layer with frame: %@", NSStringFromCGRect(pipLayer.frame));
         
         // Create dummy view to hold the player layer
         UIView *dummyView = [[UIView alloc] initWithFrame:pipLayer.frame];
         [dummyView.layer addSublayer:pipLayer];
         dummyView.hidden = YES;
-        [[UIApplication sharedApplication].windows.firstObject.rootViewController.view addSubview:dummyView];
+        NSLog(@"🔧 PiP: Created dummy view with frame: %@", NSStringFromCGRect(dummyView.frame));
+        
+        // Add to view hierarchy
+        UIViewController *rootVC = [UIApplication sharedApplication].windows.firstObject.rootViewController;
+        if (rootVC) {
+            [rootVC.view addSubview:dummyView];
+            NSLog(@"🔧 PiP: Added dummy view to root view controller");
+        } else {
+            NSLog(@"❌ PiP: No root view controller found!");
+        }
         
         // Store references using a simple key (0 for global PiP)
         [_pipLayers setObject:pipLayer forKey:@(0)];
         [_pipDummyViews setObject:dummyView forKey:@(0)];
         
-        NSLog(@"✅ PiP layer created for global PiP");
+        NSLog(@"✅ PiP: Layer created and stored for global PiP");
         result(@YES);
     } else if ([call.method isEqualToString:@"enterPipMode"]) {
+        NSLog(@"🔧 PiP: enterPipMode called");
+        
         // Use global PiP layer (key 0)
         AVPlayerLayer *pipLayer = [_pipLayers objectForKey:@(0)];
         if (!pipLayer) {
+            NSLog(@"❌ PiP: No layer found for global PiP");
             result([FlutterError errorWithCode:@"NO_LAYER" message:@"PiP not enabled" details:nil]);
             return;
         }
         
+        NSLog(@"✅ PiP: Found layer for global PiP: %@", pipLayer);
+        
+        // Check if PiP is already active
+        AVPictureInPictureController *existingController = [_pipControllers objectForKey:@(0)];
+        if (existingController && existingController.isPictureInPictureActive) {
+            NSLog(@"⚠️ PiP: Already active, stopping first");
+            [existingController stopPictureInPicture];
+        }
+        
         // Create PiP controller with player layer
+        NSLog(@"🔧 PiP: Creating AVPictureInPictureController...");
         AVPictureInPictureController *pipController = [[AVPictureInPictureController alloc] initWithPlayerLayer:pipLayer];
         
         if (!pipController) {
+            NSLog(@"❌ PiP: Failed to create AVPictureInPictureController");
             result(@NO);
             return;
         }
         
+        NSLog(@"✅ PiP: Created AVPictureInPictureController: %@", pipController);
+        
         pipController.delegate = self;
         if (@available(iOS 14.2, *)) {
             pipController.canStartPictureInPictureAutomaticallyFromInline = YES;
+            NSLog(@"🔧 PiP: Set canStartPictureInPictureAutomaticallyFromInline = YES");
         }
         
         [_pipControllers setObject:pipController forKey:@(0)];
+        
+        NSLog(@"🔧 PiP: Starting Picture-in-Picture...");
         [pipController startPictureInPicture];
         
-        NSLog(@"✅ PiP mode entered for global PiP");
+        NSLog(@"✅ PiP: startPictureInPicture called for global PiP");
         result(@YES);
     } else if ([call.method isEqualToString:@"exitPipMode"]) {
+        NSLog(@"🔧 PiP: exitPipMode called");
+        
         // Use global PiP controller (key 0)
         AVPictureInPictureController *pipController = [_pipControllers objectForKey:@(0)];
         if (pipController) {
+            NSLog(@"🔧 PiP: Found controller, stopping Picture-in-Picture...");
+            NSLog(@"🔧 PiP: Is PiP active before stop: %@", pipController.isPictureInPictureActive ? @"YES" : @"NO");
             [pipController stopPictureInPicture];
-            NSLog(@"✅ PiP mode exited for global PiP");
+            NSLog(@"✅ PiP: stopPictureInPicture called for global PiP");
+        } else {
+            NSLog(@"⚠️ PiP: No controller found for global PiP");
         }
         result(@YES);
     } else {
@@ -301,33 +350,47 @@ private:
 
 // AVPictureInPictureControllerDelegate methods
 - (void)pictureInPictureControllerWillStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
-    NSLog(@"🔄 PiP will start");
+    NSLog(@"🔄 PiP: Will start Picture-in-Picture");
+    NSLog(@"🔧 PiP: Controller: %@", pictureInPictureController);
+    NSLog(@"🔧 PiP: Is PiP supported: %@", [AVPictureInPictureController isPictureInPictureSupported] ? @"YES" : @"NO");
 }
 
 - (void)pictureInPictureControllerDidStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
-    NSLog(@"✅ PiP did start");
+    NSLog(@"✅ PiP: Did start Picture-in-Picture");
+    NSLog(@"🔧 PiP: Controller: %@", pictureInPictureController);
+    NSLog(@"🔧 PiP: Is PiP active: %@", pictureInPictureController.isPictureInPictureActive ? @"YES" : @"NO");
     [self sendLogToFlutter:@"Native: ✅ PiP did start"];
-    // Could notify Flutter via channel if needed
 }
 
 - (void)pictureInPictureControllerWillStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
-    NSLog(@"🔄 PiP will stop");
+    NSLog(@"🔄 PiP: Will stop Picture-in-Picture");
+    NSLog(@"🔧 PiP: Controller: %@", pictureInPictureController);
 }
 
 - (void)pictureInPictureControllerDidStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
-    NSLog(@"✅ PiP did stop");
+    NSLog(@"✅ PiP: Did stop Picture-in-Picture");
+    NSLog(@"🔧 PiP: Controller: %@", pictureInPictureController);
     [self sendLogToFlutter:@"Native: ✅ PiP did stop"];
-    // Could notify Flutter via channel if needed
 }
 
 - (void)pictureInPictureController:(AVPictureInPictureController *)pictureInPictureController failedToStartPictureInPictureWithError:(NSError *)error {
-    NSLog(@"❌ PiP failed to start: %@", error.localizedDescription);
+    NSLog(@"❌ PiP: Failed to start Picture-in-Picture");
+    NSLog(@"🔧 PiP: Controller: %@", pictureInPictureController);
+    NSLog(@"🔧 PiP: Error: %@", error);
+    NSLog(@"🔧 PiP: Error code: %ld", (long)error.code);
+    NSLog(@"🔧 PiP: Error domain: %@", error.domain);
+    NSLog(@"🔧 PiP: Error userInfo: %@", error.userInfo);
+    
     [self sendLogToFlutter:[NSString stringWithFormat:@"Native: ❌ PiP failed: %@", error.localizedDescription]];
     
     if (error.code == -1001) {
+        NSLog(@"🔧 PiP: Error -1001: PiP already active");
         [self sendLogToFlutter:@"Native: Error - PiP already active"];
     } else if (error.code == -1002) {
+        NSLog(@"🔧 PiP: Error -1002: PiP disabled");
         [self sendLogToFlutter:@"Native: Error - PiP disabled"];
+    } else {
+        NSLog(@"🔧 PiP: Unknown error code: %ld", (long)error.code);
     }
 }
 
