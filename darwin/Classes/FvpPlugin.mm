@@ -10,6 +10,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <AVKit/AVKit.h>
 #import <CoreVideo/CoreVideo.h>
+#import <CoreMedia/CoreMedia.h>
 #import <Metal/Metal.h>
 #include <mutex>
 #include <unordered_map>
