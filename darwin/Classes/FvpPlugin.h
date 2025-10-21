@@ -5,6 +5,9 @@
 #endif
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
+#if TARGET_OS_IPHONE
+#import <AVKit/AVKit.h>
+#endif
 
 #if TARGET_OS_IPHONE
 @interface FvpPlugin : NSObject<FlutterPlugin, AVPictureInPictureControllerDelegate>
