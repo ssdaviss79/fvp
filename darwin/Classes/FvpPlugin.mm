@@ -246,22 +246,69 @@ private:
         
         NSLog(@"✅ PiP: Picture-in-Picture is supported");
         
-        // Create a simple approach: use a dummy video file for PiP
-        // This is a workaround since we can't easily sync mdk frames to AVPlayerLayer
-        NSURL *dummyVideoURL = [NSURL URLWithString:@"about:blank"];
-        NSLog(@"🔧 PiP: Creating dummy video URL: %@", dummyVideoURL);
+        // Create a simple approach: use a test video file for PiP
+        // Try with a real video URL first to see if that works
+        NSURL *testVideoURL = [NSURL URLWithString:@"https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"];
+        NSLog(@"🔧 PiP: Creating test video URL: %@", testVideoURL);
         
-        AVPlayerItem *dummyItem = [AVPlayerItem playerItemWithURL:dummyVideoURL];
-        NSLog(@"🔧 PiP: Created dummy player item: %@", dummyItem);
+        AVPlayerItem *testItem = [AVPlayerItem playerItemWithURL:testVideoURL];
+        NSLog(@"🔧 PiP: Created test player item: %@", testItem);
         
-        AVPlayer *pipPlayer = [AVPlayer playerWithPlayerItem:dummyItem];
+        AVPlayer *pipPlayer = [AVPlayer playerWithPlayerItem:testItem];
         NSLog(@"🔧 PiP: Created pip player: %@", pipPlayer);
+        
+        // INVESTIGATION POINT 1: Verify AVPlayer object creation
+        if (pipPlayer) {
+            NSLog(@"✅ PiP: AVPlayer object created successfully");
+            NSLog(@"🔧 PiP: AVPlayer description: %@", pipPlayer.description);
+            NSLog(@"🔧 PiP: AVPlayer current item: %@", pipPlayer.currentItem);
+            NSLog(@"🔧 PiP: AVPlayer rate: %f", pipPlayer.rate);
+        } else {
+            NSLog(@"❌ PiP: AVPlayer object creation FAILED");
+        }
+        
+        // INVESTIGATION POINT 2: Check if AVPlayer has content
+        if (pipPlayer.currentItem) {
+            NSLog(@"✅ PiP: AVPlayer has current item: %@", pipPlayer.currentItem);
+            NSLog(@"🔧 PiP: Current item status: %ld", (long)pipPlayer.currentItem.status);
+            NSLog(@"🔧 PiP: Current item duration: %@", pipPlayer.currentItem.duration);
+            NSLog(@"🔧 PiP: Current item URL: %@", pipPlayer.currentItem.asset);
+            
+            // Check if the item is ready to play
+            if (pipPlayer.currentItem.status == AVPlayerItemStatusReadyToPlay) {
+                NSLog(@"✅ PiP: Current item is ready to play");
+            } else if (pipPlayer.currentItem.status == AVPlayerItemStatusFailed) {
+                NSLog(@"❌ PiP: Current item failed to load: %@", pipPlayer.currentItem.error);
+            } else {
+                NSLog(@"⚠️ PiP: Current item status is unknown or not ready");
+            }
+        } else {
+            NSLog(@"❌ PiP: AVPlayer has NO current item - NO CONTENT!");
+        }
         
         AVPlayerLayer *pipLayer = [AVPlayerLayer playerLayerWithPlayer:pipPlayer];
         pipLayer.frame = CGRectMake(0, 0, 640, 360); // Default size, will be updated
         pipLayer.videoGravity = AVLayerVideoGravityResizeAspect;
         pipLayer.hidden = YES;
         NSLog(@"🔧 PiP: Created player layer with frame: %@", NSStringFromCGRect(pipLayer.frame));
+        
+        // INVESTIGATION POINT 3: Verify AVPlayerLayer connection to AVPlayer
+        if (pipLayer) {
+            NSLog(@"✅ PiP: AVPlayerLayer created successfully");
+            NSLog(@"🔧 PiP: AVPlayerLayer player: %@", pipLayer.player);
+            NSLog(@"🔧 PiP: AVPlayerLayer frame: %@", NSStringFromCGRect(pipLayer.frame));
+            NSLog(@"🔧 PiP: AVPlayerLayer video gravity: %@", pipLayer.videoGravity);
+            NSLog(@"🔧 PiP: AVPlayerLayer is hidden: %@", pipLayer.hidden ? @"YES" : @"NO");
+            
+            // Check if the layer is connected to the player
+            if (pipLayer.player == pipPlayer) {
+                NSLog(@"✅ PiP: AVPlayerLayer is properly connected to AVPlayer");
+            } else {
+                NSLog(@"❌ PiP: AVPlayerLayer is NOT connected to AVPlayer!");
+            }
+        } else {
+            NSLog(@"❌ PiP: AVPlayerLayer creation FAILED");
+        }
         
         // Create dummy view to hold the player layer
         UIView *dummyView = [[UIView alloc] initWithFrame:pipLayer.frame];
@@ -323,6 +370,23 @@ private:
         }
         
         [_pipControllers setObject:pipController forKey:@(0)];
+        
+        // INVESTIGATION POINT 4: Check AVPlayer state before starting PiP
+        AVPlayer *player = pipLayer.player;
+        if (player) {
+            NSLog(@"🔧 PiP: AVPlayer state before PiP start:");
+            NSLog(@"🔧 PiP: - Player rate: %f", player.rate);
+            NSLog(@"🔧 PiP: - Player current item: %@", player.currentItem);
+            NSLog(@"🔧 PiP: - Player current time: %@", player.currentTime);
+            
+            if (player.currentItem) {
+                NSLog(@"🔧 PiP: - Current item status: %ld", (long)player.currentItem.status);
+                NSLog(@"🔧 PiP: - Current item duration: %@", player.currentItem.duration);
+                NSLog(@"🔧 PiP: - Current item error: %@", player.currentItem.error);
+            }
+        } else {
+            NSLog(@"❌ PiP: No player found in layer before PiP start!");
+        }
         
         NSLog(@"🔧 PiP: Starting Picture-in-Picture...");
         [pipController startPictureInPicture];
