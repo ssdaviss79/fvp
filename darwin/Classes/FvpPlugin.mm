@@ -18,13 +18,9 @@
 using namespace mdk;
 using namespace std;
 
-// Forward declarations
-@interface FvpPipController : NSObject <AVPictureInPictureControllerDelegate>
-@property (nonatomic, strong) AVPictureInPictureController *pipController;
-@property (nonatomic, strong) AVPlayerLayer *pipLayer;  // Changed to AVPlayerLayer
-@property (nonatomic, assign) int64_t textureId;
-@property (nonatomic, strong) FlutterMethodChannel *channel;
-@property (nonatomic, strong) AVPlayer *pipPlayer;  // Added for FFmpeg bridge
+@interface FvpPipController ()
+@property (nonatomic, strong) AVPlayerLayer *pipLayer;  // private
+@property (nonatomic, strong) AVPlayer *pipPlayer;      // private
 @end
 
 @interface MetalTexture : NSObject<FlutterTexture>
