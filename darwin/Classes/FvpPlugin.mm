@@ -8,10 +8,9 @@
 #include "mdk/RenderAPI.h"
 #include "mdk/Player.h"
 #import <AVFoundation/AVFoundation.h>
-// #import <AVKit/AVKit.h>
+#import <AVKit/AVKit.h>
 #import <CoreVideo/CoreVideo.h>
 #import <Metal/Metal.h>
-#import <CoreMedia/CoreMedia.h>
 #include <mutex>
 #include <unordered_map>
 #include <iostream>
@@ -107,8 +106,8 @@ public:
             renderVideo();
             [texReg textureFrameAvailable:texId_];
             
-            // Sync frame to PiP if active
-            [plugin_ syncFrameToPipForTextureId:texId_ pixelBuffer:mtex_->pixbuf];
+            // Sync frame to PiP if enabled
+            [self syncFrameToPip];
         });
     }
 
@@ -118,21 +117,64 @@ public:
     }
 
     int64_t textureId() const { return texId_;}
+    
+    void syncFrameToPip() {
+        if (!plugin_) return;
+        
+        // Get the current pixel buffer from the Metal texture
+        CVPixelBufferRef pixelBuffer = [mtex_ copyPixelBuffer];
+        if (!pixelBuffer) return;
+        
+        // Check if PiP is enabled for this texture
+        AVSampleBufferDisplayLayer *displayLayer = [plugin_.pipDisplayLayers objectForKey:@(texId_)];
+        if (!displayLayer) {
+            CVPixelBufferRelease(pixelBuffer);
+            return;
+        }
+        
+        // Create CMSampleBuffer from CVPixelBuffer
+        CMSampleBufferRef sampleBuffer = [self createSampleBufferFromPixelBuffer:pixelBuffer];
+        if (sampleBuffer) {
+            [displayLayer enqueueSampleBuffer:sampleBuffer];
+            CFRelease(sampleBuffer);
+        }
+        
+        CVPixelBufferRelease(pixelBuffer);
+    }
+    
+    CMSampleBufferRef createSampleBufferFromPixelBuffer:(CVPixelBufferRef)pixelBuffer {
+        CMVideoFormatDescriptionRef formatDescription;
+        OSStatus status = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pixelBuffer, &formatDescription);
+        if (status != noErr) {
+            return NULL;
+        }
+        
+        CMSampleTimingInfo timingInfo = {0};
+        timingInfo.duration = CMTimeMake(1, 30); // 30 FPS
+        timingInfo.presentationTimeStamp = CMTimeMakeWithSeconds(CACurrentMediaTime(), 1000000000);
+        
+        CMSampleBufferRef sampleBuffer;
+        status = CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, pixelBuffer, formatDescription, &timingInfo, &sampleBuffer);
+        
+        CFRelease(formatDescription);
+        return sampleBuffer;
+    }
+    
 private:
     int64_t texId_ = 0;
     MetalTexture* mtex_ = nil;
-    FvpPlugin* plugin_ = nil;
+    __weak FvpPlugin* plugin_;
 };
 
 
-@interface FvpPlugin () {
+@interface FvpPlugin () <AVPictureInPictureControllerDelegate> {
     unordered_map<int64_t, shared_ptr<TexturePlayer>> players;
 }
 @property(readonly, strong, nonatomic) NSObject<FlutterTextureRegistry>* texRegistry;
-@property (nonatomic, strong) NSMutableDictionary<NSNumber*, AVPlayerLayer*> *pipLayers;
-@property (nonatomic, strong) NSMutableDictionary<NSNumber*, AVPictureInPictureController*> *pipControllers;
-@property (nonatomic, strong) NSMutableDictionary<NSNumber*, NSNumber*> *pipActiveFlags;
-@property (nonatomic, strong) NSMutableDictionary<NSNumber*, AVPlayer*> *pipPlayers;
+@property(strong, nonatomic) NSMutableDictionary<NSNumber*, AVPlayerLayer*>* pipLayers;
+@property(strong, nonatomic) NSMutableDictionary<NSNumber*, AVPictureInPictureController*>* pipControllers;
+@property(strong, nonatomic) NSMutableDictionary<NSNumber*, AVPlayer*>* pipPlayers;
+@property(strong, nonatomic) NSMutableDictionary<NSNumber*, AVSampleBufferDisplayLayer*>* pipDisplayLayers;
 @end
 
 @implementation FvpPlugin
@@ -162,11 +204,11 @@ private:
 #else
     _texRegistry = [registrar textures];
 #endif
-    // Initialize PiP-related dictionaries
+    // Initialize PiP state management dictionaries
     _pipLayers = [NSMutableDictionary dictionary];
     _pipControllers = [NSMutableDictionary dictionary];
-    _pipActiveFlags = [NSMutableDictionary dictionary];
     _pipPlayers = [NSMutableDictionary dictionary];
+    _pipDisplayLayers = [NSMutableDictionary dictionary];
     return self;
 }
 
@@ -182,17 +224,8 @@ private:
         const auto texId = ((NSNumber*)call.arguments[@"texture"]).longLongValue;
         [_texRegistry unregisterTexture:texId];
         players.erase(texId);
-        
-        // Clean up PiP resources for this texture
-        AVPictureInPictureController *pipController = [_pipControllers objectForKey:@(texId)];
-        if (pipController) {
-            [pipController stopPictureInPicture];
-            [_pipControllers removeObjectForKey:@(texId)];
-        }
-        [_pipLayers removeObjectForKey:@(texId)];
-        [_pipPlayers removeObjectForKey:@(texId)];
-        [_pipActiveFlags removeObjectForKey:@(texId)];
-        
+        // Clean up PiP resources
+        [self cleanupPipForTextureId:texId];
         result(nil);
     } else if ([call.method isEqualToString:@"MixWithOthers"]) {
         [[maybe_unused]] const auto value = ((NSNumber*)call.arguments[@"value"]).boolValue;
@@ -209,24 +242,34 @@ private:
         NSNumber *textureIdNum = call.arguments[@"textureId"];
         int64_t textureId = [textureIdNum longLongValue];
         
-        // Get TexturePlayer from players map
-        auto texPlayer = players[textureId];
-        if (!texPlayer) {
+        // Check if texture exists
+        auto it = players.find(textureId);
+        if (it == players.end()) {
             result([FlutterError errorWithCode:@"NO_TEXTURE" message:@"Texture not found" details:nil]);
             return;
         }
         
-        // Create hidden AVPlayerLayer for PiP
-        AVPlayer *pipPlayer = [AVPlayer playerWithPlayerItem:nil];
+        // Create AVSampleBufferDisplayLayer for frame synchronization
+        AVSampleBufferDisplayLayer *displayLayer = [AVSampleBufferDisplayLayer layer];
+        displayLayer.videoGravity = AVLayerVideoGravityResizeAspect;
+        displayLayer.hidden = YES;
+        
+        // Create a dummy AVPlayerItem for the AVPlayerLayer
+        AVPlayerItem *playerItem = [AVPlayerItem playerItemWithURL:[NSURL URLWithString:@"about:blank"]];
+        AVPlayer *pipPlayer = [AVPlayer playerWithPlayerItem:playerItem];
         AVPlayerLayer *pipLayer = [AVPlayerLayer playerLayerWithPlayer:pipPlayer];
-        pipLayer.frame = CGRectMake(0, 0, 1920, 1080); // Default size, will be updated
+        pipLayer.frame = CGRectMake(0, 0, 640, 360); // Default size, will be updated
         pipLayer.videoGravity = AVLayerVideoGravityResizeAspect;
         pipLayer.hidden = YES;
+        
+        // Add the display layer as a sublayer of the player layer
+        [pipLayer addSublayer:displayLayer];
+        displayLayer.frame = pipLayer.bounds;
         
         // Store references
         [_pipLayers setObject:pipLayer forKey:@(textureId)];
         [_pipPlayers setObject:pipPlayer forKey:@(textureId)];
-        [_pipActiveFlags setObject:@NO forKey:@(textureId)];
+        [_pipDisplayLayers setObject:displayLayer forKey:@(textureId)];
         
         NSLog(@"✅ PiP layer created for texture %lld", textureId);
         result(@YES);
@@ -240,12 +283,7 @@ private:
             return;
         }
         
-        // Check if PiP is supported
-        if (![AVPictureInPictureController isPictureInPictureSupported]) {
-            result([FlutterError errorWithCode:@"PIP_NOT_SUPPORTED" message:@"Picture in Picture not supported on this device" details:nil]);
-            return;
-        }
-        
+        // Create PiP controller
         AVPictureInPictureController *pipController = [[AVPictureInPictureController alloc] initWithPlayerLayer:pipLayer];
         if (!pipController) {
             result(@NO);
@@ -258,10 +296,9 @@ private:
         }
         
         [_pipControllers setObject:pipController forKey:@(textureId)];
-        [_pipActiveFlags setObject:@YES forKey:@(textureId)];
-        
         [pipController startPictureInPicture];
-        NSLog(@"✅ PiP mode started for texture %lld", textureId);
+        
+        NSLog(@"✅ PiP mode entered for texture %lld", textureId);
         result(@YES);
     } else if ([call.method isEqualToString:@"exitPipMode"]) {
         NSNumber *textureIdNum = call.arguments[@"textureId"];
@@ -270,9 +307,7 @@ private:
         AVPictureInPictureController *pipController = [_pipControllers objectForKey:@(textureId)];
         if (pipController) {
             [pipController stopPictureInPicture];
-            [_pipControllers removeObjectForKey:@(textureId)];
-            [_pipActiveFlags setObject:@NO forKey:@(textureId)];
-            NSLog(@"✅ PiP mode stopped for texture %lld", textureId);
+            NSLog(@"✅ PiP mode exited for texture %lld", textureId);
         }
         result(@YES);
     } else {
@@ -280,66 +315,9 @@ private:
     }
 }
 
-#pragma mark - PiP Frame Synchronization
-
-- (void)syncFrameToPipForTextureId:(int64_t)textureId pixelBuffer:(CVPixelBufferRef)pixelBuffer {
-    // Check if PiP is active for this texture
-    NSNumber *isActive = [_pipActiveFlags objectForKey:@(textureId)];
-    if (![isActive boolValue]) {
-        return;
-    }
-    
-    AVPlayer *pipPlayer = [_pipPlayers objectForKey:@(textureId)];
-    if (!pipPlayer) {
-        return;
-    }
-    
-    // Create a sample buffer from the pixel buffer
-    CMSampleBufferRef sampleBuffer = [self createSampleBufferFromPixelBuffer:pixelBuffer];
-    if (sampleBuffer) {
-        // For now, we'll use a simple approach - create an AVPlayerItem with the sample buffer
-        // In a more sophisticated implementation, you might want to use AVSampleBufferDisplayLayer
-        // or enqueue multiple sample buffers to create a proper video stream
-        
-        // This is a simplified approach - in practice, you'd want to manage the video stream properly
-        NSLog(@"🔄 Syncing frame to PiP for texture %lld", textureId);
-        
-        CFRelease(sampleBuffer);
-    }
-}
-
-- (CMSampleBufferRef)createSampleBufferFromPixelBuffer:(CVPixelBufferRef)pixelBuffer {
-    if (!pixelBuffer) {
-        return NULL;
-    }
-    
-    // Create timing info
-    CMTime presentationTime = CMTimeMakeWithSeconds(CACurrentMediaTime(), 600);
-    
-    // Create format description
-    CMVideoFormatDescriptionRef formatDescription = NULL;
-    OSStatus status = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pixelBuffer, &formatDescription);
-    if (status != noErr) {
-        return NULL;
-    }
-    
-    // Create sample buffer
-    CMSampleBufferRef sampleBuffer = NULL;
-    status = CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault, pixelBuffer, true, NULL, NULL, formatDescription, NULL, &sampleBuffer);
-    
-    CFRelease(formatDescription);
-    
-    if (status != noErr) {
-        return NULL;
-    }
-    
-    return sampleBuffer;
-}
-
-#pragma mark - AVPictureInPictureControllerDelegate
-
+// AVPictureInPictureControllerDelegate methods
 - (void)pictureInPictureControllerWillStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
-    NSLog(@"✅ PiP will start");
+    NSLog(@"🔄 PiP will start");
 }
 
 - (void)pictureInPictureControllerDidStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
@@ -347,57 +325,53 @@ private:
 }
 
 - (void)pictureInPictureControllerWillStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
-    NSLog(@"✅ PiP will stop");
+    NSLog(@"🔄 PiP will stop");
 }
 
 - (void)pictureInPictureControllerDidStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
     NSLog(@"✅ PiP did stop");
-    // Find and clean up the controller
-    for (NSNumber *textureId in _pipControllers.allKeys) {
-        if ([_pipControllers objectForKey:textureId] == pictureInPictureController) {
-            [_pipControllers removeObjectForKey:textureId];
-            [_pipActiveFlags setObject:@NO forKey:textureId];
-            break;
-        }
-    }
 }
 
 - (void)pictureInPictureController:(AVPictureInPictureController *)pictureInPictureController failedToStartPictureInPictureWithError:(NSError *)error {
     NSLog(@"❌ PiP failed to start: %@", error.localizedDescription);
 }
 
-- (void)pictureInPictureController:(AVPictureInPictureController *)pictureInPictureController restoreUserInterfaceForPictureInPictureStopWithCompletionHandler:(void (^)(BOOL))completionHandler {
-    NSLog(@"✅ PiP restore user interface");
-    completionHandler(YES);
+// Helper method to cleanup PiP resources
+- (void)cleanupPipForTextureId:(int64_t)textureId {
+    NSNumber *textureIdNum = @(textureId);
+    
+    // Stop PiP controller if active
+    AVPictureInPictureController *pipController = [_pipControllers objectForKey:textureIdNum];
+    if (pipController) {
+        [pipController stopPictureInPicture];
+        [_pipControllers removeObjectForKey:textureIdNum];
+    }
+    
+    // Clean up layers and players
+    [_pipLayers removeObjectForKey:textureIdNum];
+    [_pipPlayers removeObjectForKey:textureIdNum];
+    [_pipDisplayLayers removeObjectForKey:textureIdNum];
+    
+    NSLog(@"🧹 Cleaned up PiP resources for texture %lld", textureId);
 }
 
 // ios only, optional. called first in dealloc(texture registry is still alive). plugin instance must be registered via publish
 - (void)detachFromEngineForRegistrar:(NSObject<FlutterPluginRegistrar> *)registrar {
   players.clear();
-  
   // Clean up all PiP resources
-  for (AVPictureInPictureController *controller in _pipControllers.allValues) {
-    [controller stopPictureInPicture];
+  for (auto& pair : players) {
+      [self cleanupPipForTextureId:pair.first];
   }
-  [_pipControllers removeAllObjects];
-  [_pipLayers removeAllObjects];
-  [_pipPlayers removeAllObjects];
-  [_pipActiveFlags removeAllObjects];
 }
 
 #if TARGET_OS_OSX
 #else
 - (void)applicationWillTerminate:(UIApplication *)application {
   players.clear();
-  
   // Clean up all PiP resources
-  for (AVPictureInPictureController *controller in _pipControllers.allValues) {
-    [controller stopPictureInPicture];
+  for (auto& pair : players) {
+      [self cleanupPipForTextureId:pair.first];
   }
-  [_pipControllers removeAllObjects];
-  [_pipLayers removeAllObjects];
-  [_pipPlayers removeAllObjects];
-  [_pipActiveFlags removeAllObjects];
 }
 #endif
 @end
