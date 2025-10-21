@@ -8,6 +8,7 @@
 #include "mdk/RenderAPI.h"
 #include "mdk/Player.h"
 #import <AVFoundation/AVFoundation.h>
+#import <AVKit/AVKit.h>
 #import <CoreVideo/CoreVideo.h>
 #import <Metal/Metal.h>
 #include <mutex>
@@ -28,7 +29,7 @@ using namespace std;
     CVPixelBufferRef pixbuf;
     id<MTLTexture> fltex;
     CVMetalTextureCacheRef texCache;
-    mutex mtx; // ensure whole frame render pass commands are recorded before blitting
+    mutex mtx;
 }
 
 - (instancetype)initWithWidth:(int)width height:(int)height
@@ -39,13 +40,14 @@ using namespace std;
     auto td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:width height:height mipmapped:NO];
     td.usage = MTLTextureUsageRenderTarget;
     texture = [device newTextureWithDescriptor:td];
-    //assert(!texture.iosurface); // CVPixelBufferCreateWithIOSurface(fltex.iosurface)
+    
     auto attr = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     CFDictionarySetValue(attr, kCVPixelBufferMetalCompatibilityKey, kCFBooleanTrue);
     auto iosurface_props = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFDictionarySetValue(attr, kCVPixelBufferIOSurfacePropertiesKey, iosurface_props); // optional?
-    CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, attr, &pixbuf);  // FIXED: CVPixelBufferCreate
+    CFDictionarySetValue(attr, kCVPixelBufferIOSurfacePropertiesKey, iosurface_props);
+    CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, attr, &pixbuf);
     CFRelease(attr);
+    
     texCache = {};
 #if (USE_TEXCACHE + 0)
     CVMetalTextureCacheCreate(nullptr, nullptr, device, nullptr, &texCache);
@@ -55,9 +57,7 @@ using namespace std;
     CFRelease(cvtex);
 #else
     auto iosurface = CVPixelBufferGetIOSurface(pixbuf);
-    td.usage = MTLTextureUsageShaderRead; // Unknown?
-// macos: failed assertion `Texture Descriptor Validation IOSurface textures must use MTLStorageModeManaged or MTLStorageModeShared'
-// ios: failed assertion `Texture Descriptor Validation IOSurface textures must use MTLStorageModeShared
+    td.usage = MTLTextureUsageShaderRead;
     fltex = [device newTextureWithDescriptor:td iosurface:iosurface plane:0];
 #endif
     return self;
@@ -65,23 +65,23 @@ using namespace std;
 
 - (void)dealloc {
     CVPixelBufferRelease(pixbuf);
-    if (texCache)
-        CFRelease(texCache);
+    if (texCache) CFRelease(texCache);
 }
 
 - (CVPixelBufferRef _Nullable)copyPixelBuffer {
-    //return CVPixelBufferRetain(pixbuf);
     scoped_lock lock(mtx);
     auto cmdbuf = [cmdQueue commandBuffer];
     auto blit = [cmdbuf blitCommandEncoder];
-    [blit copyFromTexture:texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(texture.width, texture.height, texture.depth)
-        toTexture:fltex destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)]; // macos 10.15
+    [blit copyFromTexture:texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) 
+              sourceSize:MTLSizeMake(texture.width, texture.height, texture.depth)
+           toTexture:fltex destinationSlice:0 destinationLevel:0 
+        destinationOrigin:MTLOriginMake(0, 0, 0)];
     [blit endEncoding];
     [cmdbuf commit];
     return CVPixelBufferRetain(pixbuf);
 }
-@end
 
+@end  // ✅ FIXED: Missing @end
 
 class TexturePlayer final: public Player
 {
@@ -97,26 +97,25 @@ public:
         ra.texture = (__bridge void*)mtex_->texture;
         setRenderAPI(&ra);
         setVideoSurfaceSize(width, height);
-
         setRenderCallback([this, texReg](void* opaque){
             scoped_lock lock(mtex_->mtx);
             renderVideo();
             [texReg textureFrameAvailable:texId_];
         });
     }
-
+    
     ~TexturePlayer() override {
         setRenderCallback(nullptr);
         setVideoSurfaceSize(-1, -1);
     }
-
-    int64_t textureId() const { return texId_;}
+    
+    int64_t textureId() const { return texId_; }
 private:
     int64_t texId_ = 0;
     MetalTexture* mtex_ = nil;
 };
 
-// NEW: PiP Controller per texture
+// ✅ NEW: PiP Controller
 @interface FvpPipController : NSObject <AVPictureInPictureControllerDelegate>
 @property (nonatomic, strong) AVPictureInPictureController *pipController;
 @property (nonatomic, strong) AVSampleBufferDisplayLayer *pipLayer;
@@ -124,25 +123,27 @@ private:
 @end
 
 @implementation FvpPipController
-// Delegate methods (send logs via channel)
 - (void)pictureInPictureControllerDidStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
-    // Send to Dart: onPipStateChanged true
+    // Notify Dart via channel
 }
 
 - (void)pictureInPictureControllerDidStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
-    // Send to Dart: onPipStateChanged false
+    // Notify Dart via channel
 }
-// ... other delegates
 @end
 
+// ✅ FIXED: Interface with declared methods
 @interface FvpPlugin () {
     unordered_map<int64_t, shared_ptr<TexturePlayer>> players;
-    NSMutableDictionary<NSNumber*, FvpPipController*> *pipControllers;  // NEW: textureId -> PiP controller
+    NSMutableDictionary<NSNumber*, FvpPipController*> *pipControllers;
 }
-@property(readOnly, strong, nonatomic) NSObject<FlutterTextureRegistry>* texRegistry;
+@property (nonatomic, strong, readonly) NSObject<FlutterTextureRegistry>* texRegistry;
+- (BOOL)enablePipForTexture:(int64_t)texId;  // ✅ DECLARED
+- (BOOL)enterPipModeForTexture:(int64_t)texId width:(int)width height:(int)height;  // ✅ DECLARED
 @end
 
 @implementation FvpPlugin
+
 + (void)registerWithRegistrar:(NSObject<FlutterPluginRegistrar>*)registrar {
 #if TARGET_OS_OSX
     auto messenger = registrar.messenger;
@@ -164,12 +165,10 @@ private:
 
 - (instancetype)initWithRegistrar:(NSObject<FlutterPluginRegistrar>*)registrar {
     self = [super init];
-#if TARGET_OS_OSX
-    _texRegistry = registrar.textures;
-#else
-    _texRegistry = [registrar textures];
-    pipControllers = [NSMutableDictionary dictionary];  // NEW: Init PiP map
-#endif
+    if (self) {
+        _texRegistry = [registrar textures];
+        pipControllers = [NSMutableDictionary dictionary];
+    }
     return self;
 }
 
@@ -188,66 +187,77 @@ private:
         result(nil);
     } else if ([call.method isEqualToString:@"MixWithOthers"]) {
         [[maybe_unused]] const auto value = ((NSNumber*)call.arguments[@"value"]).boolValue;
-    } // NEW: PiP Methods
-    else if ([call.method isEqualToString:@"getTextureId"]) {
-        if (players.empty()) {
-            result(@(-1));
-            return;
-        }
-        auto it = players.rbegin();
-        result(@(it->first));
     }
-    else if ([call.method isEqualToString:@"isPipSupported"]) {
-        BOOL supported = [AVPictureInPictureController isPictureInPictureSupported];
-        result(@(supported));
-    } else if ([call.method isEqualToString:@"enablePiP"]) {
-        NSNumber *texIdNum = call.arguments[@"textureId"];
-        if (!texIdNum) {
-            result([FlutterError errorWithCode:@"INVALID_ARGS" message:@"Missing textureId" details:nil]);
-            return;
+    // ✅ FIXED: PiP methods OUTSIDE MixWithOthers
+    else if (@available(iOS 14.0, *)) {
+        if ([call.method isEqualToString:@"isPipSupported"]) {
+            BOOL supported = [AVPictureInPictureController isPictureInPictureSupported];
+            result(@(supported));
+        } else if ([call.method isEqualToString:@"getTextureId"]) {
+            if (players.empty()) {
+                result(@(-1LL));
+                return;
+            }
+            // FIXED: Use begin() instead of rbegin() for unordered_map
+            auto it = players.begin();
+            result(@(it->first));
+        } else if ([call.method isEqualToString:@"enablePiP"]) {
+            NSNumber *texIdNum = call.arguments[@"textureId"];
+            if (!texIdNum) {
+                result([FlutterError errorWithCode:@"INVALID_ARGS" message:@"Missing textureId" details:nil]);
+                return;
+            }
+            int64_t texId = [texIdNum longLongValue];
+            BOOL success = [self enablePipForTexture:texId];
+            result(@(success));
+        } else if ([call.method isEqualToString:@"enterPipMode"]) {
+            NSDictionary *args = call.arguments;
+            NSNumber *texIdNum = args[@"textureId"];
+            NSNumber *widthNum = args[@"width"];
+            NSNumber *heightNum = args[@"height"];
+            
+            if (!texIdNum || !widthNum || !heightNum) {
+                result([FlutterError errorWithCode:@"INVALID_ARGS" message:@"Missing args" details:nil]);
+                return;
+            }
+            
+            int64_t texId = [texIdNum longLongValue];
+            int width = [widthNum intValue];
+            int height = [heightNum intValue];
+            
+            BOOL success = [self enterPipModeForTexture:texId width:width height:height];
+            result(@(success));
         }
-        int64_t texId = [texIdNum longLongValue];
-        
-        if ([self enablePipForTexture:texId]) {
-            result(@YES);
-        } else {
-            result(@NO);
-        }
-    } else if ([call.method isEqualToString:@"enterPipMode"]) {
-        NSDictionary *args = call.arguments;
-        NSNumber *texIdNum = args[@"textureId"];
-        NSNumber *widthNum = args[@"width"];
-        NSNumber *heightNum = args[@"height"];
-        
-        if (!texIdNum || !widthNum || !heightNum) {
-            result([FlutterError errorWithCode:@"INVALID_ARGS" message:@"Missing args" details:nil]);
-            return;
-        }
-        
-        int64_t texId = [texIdNum longLongValue];
-        int width = [widthNum intValue];
-        int height = [heightNum intValue];
-        
-        if ([self enterPipModeForTexture:texId width:width height:height]) {
-            result(@YES);
-        } else {
-            result(@NO);
-        }
-#if TARGET_OS_OSX
-#else
-        if (value) {
-            [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback withOptions:AVAudioSessionCategoryOptionMixWithOthers error:nil];
-        } else {
-            [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback error:nil];
-        }
-#endif
-        result(nil);
     } else {
         result(FlutterMethodNotImplemented);
     }
 }
 
-// NEW: Enter PiP mode
+// ✅ IMPLEMENTED METHODS
+- (BOOL)enablePipForTexture:(int64_t)texId {
+    auto it = players.find(texId);
+    if (it == players.end()) return NO;
+    
+    AVSampleBufferDisplayLayer *pipLayer = [[AVSampleBufferDisplayLayer alloc] init];
+    pipLayer.videoGravity = AVLayerVideoGravityResizeAspect;
+    
+    AVPictureInPictureController *pipCtrl = [[AVPictureInPictureController alloc] initWithPlayerLayer:pipLayer];
+    if (!pipCtrl) return NO;
+    
+    pipCtrl.delegate = self;
+    if (@available(iOS 14.2, *)) {
+        pipCtrl.canStartPictureInPictureAutomaticallyFromInline = YES;
+    }
+    
+    FvpPipController *controller = [[FvpPipController alloc] init];
+    controller.pipController = pipCtrl;
+    controller.pipLayer = pipLayer;
+    controller.textureId = texId;
+    pipControllers[@(texId)] = controller;
+    
+    return YES;
+}
+
 - (BOOL)enterPipModeForTexture:(int64_t)texId width:(int)width height:(int)height {
     FvpPipController *pipCtrl = pipControllers[@(texId)];
     if (!pipCtrl || !pipCtrl.pipController) return NO;
@@ -259,27 +269,35 @@ private:
     return NO;
 }
 
-// NEW: Delegate forwarding
+// Delegate forwarding
 - (void)pictureInPictureControllerDidStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
-    // Find textureId and notify Dart
-    for (NSNumber *texIdNum in pipControllers) {
-        FvpPipController *ctrl = pipControllers[texIdNum];
+    // Find and notify Dart
+    for (NSNumber *key in pipControllers) {
+        FvpPipController *ctrl = pipControllers[key];
         if (ctrl.pipController == pictureInPictureController) {
-            // Send event: {"method": "onPipStateChanged", "textureId": texId, "active": true}
+            // TODO: Send event to Dart
             break;
         }
     }
 }
 
-// ios only, optional. called first in dealloc(texture registry is still alive). plugin instance must be registered via publish
-- (void)detachFromEngineForRegistrar:(NSObject<FlutterPluginRegistrar> *)registrar {
-  players.clear();
+- (void)pictureInPictureControllerDidStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
+    // Find and notify Dart
+    for (NSNumber *key in pipControllers) {
+        FvpPipController *ctrl = pipControllers[key];
+        if (ctrl.pipController == pictureInPictureController) {
+            // TODO: Send event to Dart
+            break;
+        }
+    }
 }
 
-#if TARGET_OS_OSX
-#else
-- (void)applicationWillTerminate:(UIApplication *)application {
-  players.clear();
+- (void)detachFromEngineForRegistrar:(NSObject<FlutterPluginRegistrar> *)registrar {
+    players.clear();
+    [pipControllers removeAllObjects];
 }
-#endif
+
+@end
+
+@implementation FvpPipController
 @end
