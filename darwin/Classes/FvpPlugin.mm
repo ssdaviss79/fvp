@@ -81,7 +81,7 @@ using namespace std;
     return CVPixelBufferRetain(pixbuf);
 }
 
-@end  // ✅ FIXED: Missing @end
+@end
 
 class TexturePlayer final: public Player
 {
@@ -115,31 +115,63 @@ private:
     MetalTexture* mtex_ = nil;
 };
 
-// ✅ NEW: PiP Controller
+// ✅ FIXED: PiP Controller - SINGLE declaration
 @interface FvpPipController : NSObject <AVPictureInPictureControllerDelegate>
 @property (nonatomic, strong) AVPictureInPictureController *pipController;
-@property (nonatomic, strong) AVSampleBufferDisplayLayer *pipLayer;
+@property (nonatomic, strong) AVPlayerLayer *pipLayer;  // ✅ FIXED: Use AVPlayerLayer
 @property (nonatomic, assign) int64_t textureId;
+@property (nonatomic, strong) FlutterMethodChannel *channel;  // ✅ ADDED: For Dart communication
 @end
 
 @implementation FvpPipController
+
 - (void)pictureInPictureControllerDidStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
-    // Notify Dart via channel
+    // ✅ FIXED: Notify Dart via channel
+    if (self.channel) {
+        [self.channel invokeMethod:@"onPipStateChanged" arguments:@YES];
+    }
 }
 
 - (void)pictureInPictureControllerDidStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
-    // Notify Dart via channel
+    // ✅ FIXED: Notify Dart via channel
+    if (self.channel) {
+        [self.channel invokeMethod:@"onPipStateChanged" arguments:@NO];
+    }
 }
+
+- (void)pictureInPictureController:(AVPictureInPictureController *)pictureInPictureController 
+    failedToStartPictureInPictureWithError:(NSError *)error {
+    // ✅ ADDED: Handle PiP failures
+    if (self.channel) {
+        [self.channel invokeMethod:@"onPipError" arguments:error.localizedDescription];
+    }
+}
+
+- (void)pictureInPictureControllerWillStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
+    // ✅ ADDED: Will start delegate
+}
+
+- (void)pictureInPictureControllerWillStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
+    // ✅ ADDED: Will stop delegate
+}
+
+- (void)pictureInPictureController:(AVPictureInPictureController *)pictureInPictureController 
+    restoreUserInterfaceForPictureInPictureStopWithCompletionHandler:(void (^)(BOOL))completionHandler {
+    // ✅ ADDED: Restore UI delegate
+    completionHandler(YES);
+}
+
 @end
 
-// ✅ FIXED: Interface with declared methods
+// ✅ FIXED: FvpPlugin interface
 @interface FvpPlugin () {
     unordered_map<int64_t, shared_ptr<TexturePlayer>> players;
     NSMutableDictionary<NSNumber*, FvpPipController*> *pipControllers;
 }
 @property (nonatomic, strong, readonly) NSObject<FlutterTextureRegistry>* texRegistry;
-- (BOOL)enablePipForTexture:(int64_t)texId;  // ✅ DECLARED
-- (BOOL)enterPipModeForTexture:(int64_t)texId width:(int)width height:(int)height;  // ✅ DECLARED
+@property (nonatomic, strong) FlutterMethodChannel *channel;  // ✅ ADDED: For Dart communication
+- (BOOL)enablePipForTexture:(int64_t)texId;
+- (BOOL)enterPipModeForTexture:(int64_t)texId width:(int)width height:(int)height;
 @end
 
 @implementation FvpPlugin
@@ -149,14 +181,15 @@ private:
     auto messenger = registrar.messenger;
 #else
     auto messenger = [registrar messenger];
-  // Allow audio playback when the Ring/Silent switch is set to silent
+    // Allow audio playback when the Ring/Silent switch is set to silent
     [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback error:nil];
 #endif
     FlutterMethodChannel* channel = [FlutterMethodChannel methodChannelWithName:@"fvp" binaryMessenger:messenger];
     FvpPlugin* instance = [[FvpPlugin alloc] initWithRegistrar:registrar];
+    instance.channel = channel;  // ✅ ADDED: Store channel
 #if TARGET_OS_OSX
 #else
-  [registrar addApplicationDelegate:instance];
+    [registrar addApplicationDelegate:instance];
 #endif
     [registrar publish:instance];
     [registrar addMethodCallDelegate:instance channel:channel];
@@ -184,11 +217,12 @@ private:
         const auto texId = ((NSNumber*)call.arguments[@"texture"]).longLongValue;
         [_texRegistry unregisterTexture:texId];
         players.erase(texId);
+        [pipControllers removeObjectForKey:@(texId)];  // ✅ ADDED: Clean up PiP controller
         result(nil);
     } else if ([call.method isEqualToString:@"MixWithOthers"]) {
         [[maybe_unused]] const auto value = ((NSNumber*)call.arguments[@"value"]).boolValue;
     }
-    // ✅ FIXED: PiP methods OUTSIDE MixWithOthers
+    // ✅ FIXED: PiP methods
     else if (@available(iOS 14.0, *)) {
         if ([call.method isEqualToString:@"isPipSupported"]) {
             BOOL supported = [AVPictureInPictureController isPictureInPictureSupported];
@@ -198,7 +232,6 @@ private:
                 result(@(-1LL));
                 return;
             }
-            // FIXED: Use begin() instead of rbegin() for unordered_map
             auto it = players.begin();
             result(@(it->first));
         } else if ([call.method isEqualToString:@"enablePiP"]) {
@@ -227,32 +260,47 @@ private:
             
             BOOL success = [self enterPipModeForTexture:texId width:width height:height];
             result(@(success));
+        } else if ([call.method isEqualToString:@"exitPipMode"]) {
+            // ✅ ADDED: Exit PiP mode
+            for (NSNumber *key in pipControllers) {
+                FvpPipController *ctrl = pipControllers[key];
+                if (ctrl.pipController.isPictureInPictureActive) {
+                    [ctrl.pipController stopPictureInPicture];
+                    break;
+                }
+            }
+            result(@YES);
         }
     } else {
         result(FlutterMethodNotImplemented);
     }
 }
 
-// ✅ IMPLEMENTED METHODS
+// ✅ FIXED: enablePipForTexture implementation
 - (BOOL)enablePipForTexture:(int64_t)texId {
     auto it = players.find(texId);
     if (it == players.end()) return NO;
     
-    AVSampleBufferDisplayLayer *pipLayer = [[AVSampleBufferDisplayLayer alloc] init];
+    // ✅ FIXED: Create AVPlayerLayer instead of AVSampleBufferDisplayLayer
+    AVPlayerLayer *pipLayer = [[AVPlayerLayer alloc] init];
     pipLayer.videoGravity = AVLayerVideoGravityResizeAspect;
     
+    // ✅ FIXED: Create AVPictureInPictureController with AVPlayerLayer
     AVPictureInPictureController *pipCtrl = [[AVPictureInPictureController alloc] initWithPlayerLayer:pipLayer];
     if (!pipCtrl) return NO;
     
-    pipCtrl.delegate = self;
-    if (@available(iOS 14.2, *)) {
-        pipCtrl.canStartPictureInPictureAutomaticallyFromInline = YES;
-    }
-    
+    // ✅ FIXED: Create FvpPipController as delegate
     FvpPipController *controller = [[FvpPipController alloc] init];
     controller.pipController = pipCtrl;
     controller.pipLayer = pipLayer;
     controller.textureId = texId;
+    controller.channel = self.channel;  // ✅ ADDED: Set channel for Dart communication
+    pipCtrl.delegate = controller;  // ✅ FIXED: Use controller as delegate
+    
+    if (@available(iOS 14.2, *)) {
+        pipCtrl.canStartPictureInPictureAutomaticallyFromInline = YES;
+    }
+    
     pipControllers[@(texId)] = controller;
     
     return YES;
@@ -269,35 +317,9 @@ private:
     return NO;
 }
 
-// Delegate forwarding
-- (void)pictureInPictureControllerDidStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
-    // Find and notify Dart
-    for (NSNumber *key in pipControllers) {
-        FvpPipController *ctrl = pipControllers[key];
-        if (ctrl.pipController == pictureInPictureController) {
-            // TODO: Send event to Dart
-            break;
-        }
-    }
-}
-
-- (void)pictureInPictureControllerDidStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
-    // Find and notify Dart
-    for (NSNumber *key in pipControllers) {
-        FvpPipController *ctrl = pipControllers[key];
-        if (ctrl.pipController == pictureInPictureController) {
-            // TODO: Send event to Dart
-            break;
-        }
-    }
-}
-
 - (void)detachFromEngineForRegistrar:(NSObject<FlutterPluginRegistrar> *)registrar {
     players.clear();
     [pipControllers removeAllObjects];
 }
 
-@end
-
-@implementation FvpPipController
 @end
