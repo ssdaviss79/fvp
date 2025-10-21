@@ -18,17 +18,7 @@
 using namespace mdk;
 using namespace std;
 
-// ✅ FIXED: Forward declarations
-@class FvpPipController;
-
-// ✅ FIXED: Complete FvpPipController interface
-@interface FvpPipController : NSObject <AVPictureInPictureControllerDelegate>
-@property (nonatomic, strong) AVPictureInPictureController *pipController;
-@property (nonatomic, strong) AVPlayerLayer *pipLayer;
-@property (nonatomic, assign) int64_t textureId;
-@property (nonatomic, strong) FlutterMethodChannel *channel;
-@end
-
+// ✅ FIXED: Interface declared in header, implementation here
 @implementation FvpPipController
 
 - (void)pictureInPictureControllerDidStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
@@ -163,10 +153,7 @@ private:
 
 @interface FvpPlugin () {
     unordered_map<int64_t, shared_ptr<TexturePlayer>> players;
-    NSMutableDictionary<NSNumber*, FvpPipController*> *pipControllers;  // ✅ FIXED: Declared here
 }
-@property (nonatomic, strong, readonly) NSObject<FlutterTextureRegistry>* texRegistry;
-@property (nonatomic, strong) FlutterMethodChannel *channel;  // ✅ FIXED: Declared property
 @end
 
 // ✅ FIXED: Complete method declarations in interface
