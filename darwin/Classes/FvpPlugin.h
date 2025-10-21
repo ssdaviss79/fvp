@@ -5,7 +5,7 @@
 #endif
 
 @interface FvpPlugin : NSObject<FlutterPlugin>
-- (id)getDisplayLayerForTexture:(int64_t)textureId;
-- (id)getPipControllerForTexture:(int64_t)textureId;
+- (AVPlayerLayer*)getDisplayLayerForTexture:(int64_t)textureId;
+- (AVPictureInPictureController*)getPipControllerForTexture:(int64_t)textureId;
 - (void)sendLogToFlutter:(NSString*)message;
 @end
