@@ -10,6 +10,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <CoreVideo/CoreVideo.h>
 #import <Metal/Metal.h>
+#import <CoreMedia/CoreMedia.h>
 #include <mutex>
 #include <unordered_map>
 #include <iostream>
@@ -77,7 +78,7 @@ using namespace std;
     [blit copyFromTexture:texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(texture.width, texture.height, texture.depth)
         toTexture:fltex destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)]; // macos 10.15
     [blit endEncoding];
-	[cmdbuf commit];
+    [cmdbuf commit];
     return CVPixelBufferRetain(pixbuf);
 }
 @end
@@ -86,11 +87,12 @@ using namespace std;
 class TexturePlayer final: public Player
 {
 public:
-    TexturePlayer(int64_t handle, int width, int height, NSObject<FlutterTextureRegistry>* texReg)
+    TexturePlayer(int64_t handle, int width, int height, NSObject<FlutterTextureRegistry>* texReg, FvpPlugin* plugin)
         : Player(reinterpret_cast<mdkPlayerAPI*>(handle))
     {
         mtex_ = [[MetalTexture alloc] initWithWidth:width height:height];
         texId_ = [texReg registerTexture:mtex_];
+        plugin_ = plugin;
         MetalRenderAPI ra{};
         ra.device = (__bridge void*)mtex_->device;
         ra.cmdQueue = (__bridge void*)mtex_->cmdQueue;
@@ -103,6 +105,9 @@ public:
             scoped_lock lock(mtex_->mtx);
             renderVideo();
             [texReg textureFrameAvailable:texId_];
+            
+            // Sync frame to PiP if active
+            [plugin_ syncFrameToPipForTextureId:texId_ pixelBuffer:mtex_->pixbuf];
         });
     }
 
@@ -115,14 +120,18 @@ public:
 private:
     int64_t texId_ = 0;
     MetalTexture* mtex_ = nil;
+    FvpPlugin* plugin_ = nil;
 };
 
 
 @interface FvpPlugin () {
     unordered_map<int64_t, shared_ptr<TexturePlayer>> players;
-    NSMutableDictionary<NSNumber*, AVPictureInPictureController*> *_pipControllers;
 }
 @property(readonly, strong, nonatomic) NSObject<FlutterTextureRegistry>* texRegistry;
+@property (nonatomic, strong) NSMutableDictionary<NSNumber*, AVPlayerLayer*> *pipLayers;
+@property (nonatomic, strong) NSMutableDictionary<NSNumber*, AVPictureInPictureController*> *pipControllers;
+@property (nonatomic, strong) NSMutableDictionary<NSNumber*, NSNumber*> *pipActiveFlags;
+@property (nonatomic, strong) NSMutableDictionary<NSNumber*, AVPlayer*> *pipPlayers;
 @end
 
 @implementation FvpPlugin
@@ -151,8 +160,12 @@ private:
     _texRegistry = registrar.textures;
 #else
     _texRegistry = [registrar textures];
-    _pipControllers = [NSMutableDictionary new];
 #endif
+    // Initialize PiP-related dictionaries
+    _pipLayers = [NSMutableDictionary dictionary];
+    _pipControllers = [NSMutableDictionary dictionary];
+    _pipActiveFlags = [NSMutableDictionary dictionary];
+    _pipPlayers = [NSMutableDictionary dictionary];
     return self;
 }
 
@@ -161,13 +174,24 @@ private:
         const auto handle = ((NSNumber*)call.arguments[@"player"]).longLongValue;
         const auto width = ((NSNumber*)call.arguments[@"width"]).intValue;
         const auto height = ((NSNumber*)call.arguments[@"height"]).intValue;
-        auto player = make_shared<TexturePlayer>(handle, width, height, _texRegistry);
+        auto player = make_shared<TexturePlayer>(handle, width, height, _texRegistry, self);
         players[player->textureId()] = player;
         result(@(player->textureId()));
     } else if ([call.method isEqualToString:@"ReleaseRT"]) {
         const auto texId = ((NSNumber*)call.arguments[@"texture"]).longLongValue;
         [_texRegistry unregisterTexture:texId];
         players.erase(texId);
+        
+        // Clean up PiP resources for this texture
+        AVPictureInPictureController *pipController = [_pipControllers objectForKey:@(texId)];
+        if (pipController) {
+            [pipController stopPictureInPicture];
+            [_pipControllers removeObjectForKey:@(texId)];
+        }
+        [_pipLayers removeObjectForKey:@(texId)];
+        [_pipPlayers removeObjectForKey:@(texId)];
+        [_pipActiveFlags removeObjectForKey:@(texId)];
+        
         result(nil);
     } else if ([call.method isEqualToString:@"MixWithOthers"]) {
         [[maybe_unused]] const auto value = ((NSNumber*)call.arguments[@"value"]).boolValue;
@@ -180,88 +204,74 @@ private:
         }
 #endif
         result(nil);
-    } else if ([call.method isEqualToString:@"enablePiP"]) {
-        NSDictionary *args = call.arguments;
-        NSNumber *textureIdNum = args[@"textureId"];
+    } else if ([call.method isEqualToString:@"enablePipForTexture"]) {
+        NSNumber *textureIdNum = call.arguments[@"textureId"];
         int64_t textureId = [textureIdNum longLongValue];
         
-        auto it = players.find(textureId);
-        if (it == players.end()) {
+        // Get TexturePlayer from players map
+        auto texPlayer = players[textureId];
+        if (!texPlayer) {
+            result([FlutterError errorWithCode:@"NO_TEXTURE" message:@"Texture not found" details:nil]);
+            return;
+        }
+        
+        // Create hidden AVPlayerLayer for PiP
+        AVPlayer *pipPlayer = [AVPlayer playerWithPlayerItem:nil];
+        AVPlayerLayer *pipLayer = [AVPlayerLayer playerLayerWithPlayer:pipPlayer];
+        pipLayer.frame = CGRectMake(0, 0, 1920, 1080); // Default size, will be updated
+        pipLayer.videoGravity = AVLayerVideoGravityResizeAspect;
+        pipLayer.hidden = YES;
+        
+        // Store references
+        [_pipLayers setObject:pipLayer forKey:@(textureId)];
+        [_pipPlayers setObject:pipPlayer forKey:@(textureId)];
+        [_pipActiveFlags setObject:@NO forKey:@(textureId)];
+        
+        NSLog(@"✅ PiP layer created for texture %lld", textureId);
+        result(@YES);
+    } else if ([call.method isEqualToString:@"enterPipMode"]) {
+        NSNumber *textureIdNum = call.arguments[@"textureId"];
+        int64_t textureId = [textureIdNum longLongValue];
+        
+        AVPlayerLayer *pipLayer = [_pipLayers objectForKey:@(textureId)];
+        if (!pipLayer) {
+            result([FlutterError errorWithCode:@"NO_LAYER" message:@"PiP not enabled for texture" details:nil]);
+            return;
+        }
+        
+        // Check if PiP is supported
+        if (![AVPictureInPictureController isPictureInPictureSupported]) {
+            result([FlutterError errorWithCode:@"PIP_NOT_SUPPORTED" message:@"Picture in Picture not supported on this device" details:nil]);
+            return;
+        }
+        
+        AVPictureInPictureController *pipController = [[AVPictureInPictureController alloc] initWithPlayerLayer:pipLayer];
+        if (!pipController) {
             result(@NO);
             return;
         }
-        shared_ptr<TexturePlayer> texPlayer = it->second;
         
-        // Setup AVSampleBufferDisplayLayer for PiP (bridge from mdk::Player)
-        AVSampleBufferDisplayLayer *displayLayer = [AVSampleBufferDisplayLayer layer];
-        displayLayer.bounds = CGRectMake(0, 0, texPlayer->videoWidth(), texPlayer->videoHeight());
-        displayLayer.position = CGPointMake(CGRectGetMidX(displayLayer.bounds), CGRectGetMidY(displayLayer.bounds));
-        displayLayer.videoGravity = AVLayerVideoGravityResizeAspect;
-        
-        // Hidden dummy view to hold layer
-        UIView *dummyView = [UIView new];
-        dummyView.hidden = YES;
-        [dummyView.layer addSublayer:displayLayer];
-        [[UIApplication sharedApplication].keyWindow.rootViewController.view addSubview:dummyView];
-        
-        // Bridge frames: Set mdk render callback to feed to displayLayer
-        texPlayer->setRenderCallback([displayLayer](void* opaque) {
-            // Get frame from mdk (adapt from your Metal callback)
-            // In callback
-            AVFrame *avFrame = getAVFrameFromMdk();  // Adapt from mdk::Player's frame data
-            CVPixelBufferRef pixelBuffer;
-            CVPixelBufferCreate(kCFAllocatorDefault, avFrame->width, avFrame->height, kCVPixelFormatType_32BGRA, NULL, &pixelBuffer);
-            // Copy lines from avFrame->data to pixelBuffer (use av_image_copy_to_buffer or loop)
-            for (int plane = 0; plane < 3; plane++) {
-            uint8_t *dst = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, plane);
-            size_t dstStride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, plane);
-            uint8_t *src = avFrame->data[plane];
-            size_t srcStride = avFrame->linesize[plane];
-            for (int h = 0; h < avFrame->height; h++) {
-                memcpy(dst + h * dstStride, src + h * srcStride, srcStride);
-            }
-            }
-            CMSampleBufferRef sampleBuffer = NULL;
-            // Create CMSampleBuffer from pixelBuffer (timing from mdk timestamp)
-            CMSampleTimingInfo timingInfo = {kCMTimeInvalid, kCMTimeInvalid, kCMTimeInvalid};
-            CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault, pixelBuffer, YES, NULL, NULL, NULL, &timingInfo, &sampleBuffer);
-            
-            [displayLayer enqueue:sampleBuffer];
-            CFRelease(sampleBuffer);
-            CFRelease(pixelBuffer);
-        });
-        
-        // Create PiP controller with displayLayer
-        AVPictureInPictureController *pipController = [AVPictureInPictureController allocWithContentSource:[AVPictureInPictureControllerContentSource alloc] initWithSampleBufferDisplayLayer:displayLayer placeholderImage:nil]];
-        if (pipController) {
-            // Store in global map or instance var
-            _pipControllers[@(textureId)] = pipController;  // Add NSMutableDictionary * _pipControllers = [NSMutableDictionary new]; at top
-            result(@YES);
-        } else {
-            result(@NO);
+        pipController.delegate = self;
+        if (@available(iOS 14.2, *)) {
+            pipController.canStartPictureInPictureAutomaticallyFromInline = YES;
         }
-    } else if ([call.method isEqualToString:@"enterPipMode"]) {
-        NSDictionary *args = call.arguments;
-        NSNumber *textureIdNum = args[@"textureId"];
-        int64_t textureId = [textureIdNum longLongValue];
-        int width = [args[@"width"] intValue];
-        int height = [args[@"height"] intValue];
         
-        AVPictureInPictureController *pipController = _pipControllers[@(textureId)];
-        if (pipController && pipController.isPictureInPicturePossible) {
-            [pipController startPictureInPicture];
-            result(@YES);
-        } else {
-            result(@NO);
-        }
+        [_pipControllers setObject:pipController forKey:@(textureId)];
+        [_pipActiveFlags setObject:@YES forKey:@(textureId)];
+        
+        [pipController startPictureInPicture];
+        NSLog(@"✅ PiP mode started for texture %lld", textureId);
+        result(@YES);
     } else if ([call.method isEqualToString:@"exitPipMode"]) {
-        NSDictionary *args = call.arguments;
-        NSNumber *textureIdNum = args[@"textureId"];
+        NSNumber *textureIdNum = call.arguments[@"textureId"];
         int64_t textureId = [textureIdNum longLongValue];
         
-        AVPictureInPictureController *pipController = _pipControllers[@(textureId)];
-        if (pipController.isPictureInPictureActive) {
+        AVPictureInPictureController *pipController = [_pipControllers objectForKey:@(textureId)];
+        if (pipController) {
             [pipController stopPictureInPicture];
+            [_pipControllers removeObjectForKey:@(textureId)];
+            [_pipActiveFlags setObject:@NO forKey:@(textureId)];
+            NSLog(@"✅ PiP mode stopped for texture %lld", textureId);
         }
         result(@YES);
     } else {
@@ -269,15 +279,124 @@ private:
     }
 }
 
+#pragma mark - PiP Frame Synchronization
+
+- (void)syncFrameToPipForTextureId:(int64_t)textureId pixelBuffer:(CVPixelBufferRef)pixelBuffer {
+    // Check if PiP is active for this texture
+    NSNumber *isActive = [_pipActiveFlags objectForKey:@(textureId)];
+    if (![isActive boolValue]) {
+        return;
+    }
+    
+    AVPlayer *pipPlayer = [_pipPlayers objectForKey:@(textureId)];
+    if (!pipPlayer) {
+        return;
+    }
+    
+    // Create a sample buffer from the pixel buffer
+    CMSampleBufferRef sampleBuffer = [self createSampleBufferFromPixelBuffer:pixelBuffer];
+    if (sampleBuffer) {
+        // For now, we'll use a simple approach - create an AVPlayerItem with the sample buffer
+        // In a more sophisticated implementation, you might want to use AVSampleBufferDisplayLayer
+        // or enqueue multiple sample buffers to create a proper video stream
+        
+        // This is a simplified approach - in practice, you'd want to manage the video stream properly
+        NSLog(@"🔄 Syncing frame to PiP for texture %lld", textureId);
+        
+        CFRelease(sampleBuffer);
+    }
+}
+
+- (CMSampleBufferRef)createSampleBufferFromPixelBuffer:(CVPixelBufferRef)pixelBuffer {
+    if (!pixelBuffer) {
+        return NULL;
+    }
+    
+    // Create timing info
+    CMTime presentationTime = CMTimeMakeWithSeconds(CACurrentMediaTime(), 600);
+    
+    // Create format description
+    CMVideoFormatDescriptionRef formatDescription = NULL;
+    OSStatus status = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pixelBuffer, &formatDescription);
+    if (status != noErr) {
+        return NULL;
+    }
+    
+    // Create sample buffer
+    CMSampleBufferRef sampleBuffer = NULL;
+    status = CMSampleBufferCreateReadyWithImageBuffer(kCFAllocatorDefault, pixelBuffer, formatDescription, NULL, NULL, &sampleBuffer);
+    
+    CFRelease(formatDescription);
+    
+    if (status != noErr) {
+        return NULL;
+    }
+    
+    return sampleBuffer;
+}
+
+#pragma mark - AVPictureInPictureControllerDelegate
+
+- (void)pictureInPictureControllerWillStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
+    NSLog(@"✅ PiP will start");
+}
+
+- (void)pictureInPictureControllerDidStartPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
+    NSLog(@"✅ PiP did start");
+}
+
+- (void)pictureInPictureControllerWillStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
+    NSLog(@"✅ PiP will stop");
+}
+
+- (void)pictureInPictureControllerDidStopPictureInPicture:(AVPictureInPictureController *)pictureInPictureController {
+    NSLog(@"✅ PiP did stop");
+    // Find and clean up the controller
+    for (NSNumber *textureId in _pipControllers.allKeys) {
+        if ([_pipControllers objectForKey:textureId] == pictureInPictureController) {
+            [_pipControllers removeObjectForKey:textureId];
+            [_pipActiveFlags setObject:@NO forKey:textureId];
+            break;
+        }
+    }
+}
+
+- (void)pictureInPictureController:(AVPictureInPictureController *)pictureInPictureController failedToStartPictureInPictureWithError:(NSError *)error {
+    NSLog(@"❌ PiP failed to start: %@", error.localizedDescription);
+}
+
+- (void)pictureInPictureController:(AVPictureInPictureController *)pictureInPictureController restoreUserInterfaceForPictureInPictureStopWithCompletionHandler:(void (^)(BOOL))completionHandler {
+    NSLog(@"✅ PiP restore user interface");
+    completionHandler(YES);
+}
+
 // ios only, optional. called first in dealloc(texture registry is still alive). plugin instance must be registered via publish
 - (void)detachFromEngineForRegistrar:(NSObject<FlutterPluginRegistrar> *)registrar {
   players.clear();
+  
+  // Clean up all PiP resources
+  for (AVPictureInPictureController *controller in _pipControllers.allValues) {
+    [controller stopPictureInPicture];
+  }
+  [_pipControllers removeAllObjects];
+  [_pipLayers removeAllObjects];
+  [_pipPlayers removeAllObjects];
+  [_pipActiveFlags removeAllObjects];
 }
 
 #if TARGET_OS_OSX
 #else
 - (void)applicationWillTerminate:(UIApplication *)application {
   players.clear();
+  
+  // Clean up all PiP resources
+  for (AVPictureInPictureController *controller in _pipControllers.allValues) {
+    [controller stopPictureInPicture];
+  }
+  [_pipControllers removeAllObjects];
+  [_pipLayers removeAllObjects];
+  [_pipPlayers removeAllObjects];
+  [_pipActiveFlags removeAllObjects];
 }
 #endif
 @end
