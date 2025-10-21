@@ -115,13 +115,7 @@ private:
     MetalTexture* mtex_ = nil;
 };
 
-// ✅ FIXED: PiP Controller - SINGLE declaration
-@interface FvpPipController : NSObject <AVPictureInPictureControllerDelegate>
-@property (nonatomic, strong) AVPictureInPictureController *pipController;
-@property (nonatomic, strong) AVPlayerLayer *pipLayer;  // ✅ FIXED: Use AVPlayerLayer
-@property (nonatomic, assign) int64_t textureId;
-@property (nonatomic, strong) FlutterMethodChannel *channel;  // ✅ ADDED: For Dart communication
-@end
+// ✅ FIXED: PiP Controller - Interface declared in header, implementation here
 
 @implementation FvpPipController
 
