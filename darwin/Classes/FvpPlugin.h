@@ -3,6 +3,8 @@
 #else
 #import <FlutterMacOS/FlutterMacOS.h>
 #endif
+#import <AVFoundation/AVFoundation.h>
+#import <AVKit/AVKit.h>
 
 @interface FvpPlugin : NSObject<FlutterPlugin>
 - (AVPlayerLayer*)getDisplayLayerForTexture:(int64_t)textureId;
