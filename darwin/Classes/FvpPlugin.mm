@@ -18,6 +18,15 @@
 using namespace mdk;
 using namespace std;
 
+// Forward declarations
+@interface FvpPipController : NSObject <AVPictureInPictureControllerDelegate>
+@property (nonatomic, strong) AVPictureInPictureController *pipController;
+@property (nonatomic, strong) AVPlayerLayer *pipLayer;  // Changed to AVPlayerLayer
+@property (nonatomic, assign) int64_t textureId;
+@property (nonatomic, strong) FlutterMethodChannel *channel;
+@property (nonatomic, strong) AVPlayer *pipPlayer;  // Added for FFmpeg bridge
+@end
+
 @interface MetalTexture : NSObject<FlutterTexture>
 @end
 
@@ -113,6 +122,9 @@ private:
 @interface FvpPlugin () {
     unordered_map<int64_t, shared_ptr<TexturePlayer>> players;
 }
+@property (nonatomic, strong, readonly) NSObject<FlutterTextureRegistry> *texRegistry;
+@property (nonatomic, strong) FlutterMethodChannel *channel;
+@property (nonatomic, strong) NSMutableDictionary<NSNumber*, FvpPipController*> *pipControllers;
 - (BOOL)enablePipForTexture:(int64_t)texId;
 - (BOOL)enterPipModeForTexture:(int64_t)texId width:(int)width height:(int)height;
 @end
@@ -264,21 +276,25 @@ private:
         return NO;
     }
     shared_ptr<TexturePlayer> player = it->second;
+
+    // Create AVPlayer with placeholder asset (will be replaced with frames)
+    AVPlayer *avPlayer = [[AVPlayer alloc] init];
     
-    // Create hidden AVSampleBufferDisplayLayer
-    AVSampleBufferDisplayLayer *pipLayer = [[AVSampleBufferDisplayLayer alloc] init];
+    // Create hidden AVPlayerLayer
+    AVPlayerLayer *pipLayer = [[AVPlayerLayer alloc] initWithPlayer:avPlayer];
     pipLayer.videoGravity = AVLayerVideoGravityResizeAspect;
+    pipLayer.frame = CGRectMake(0, 0, 1, 1);
     
     // Create dummy view to keep layer alive
     UIView *dummyView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1, 1)];
     dummyView.hidden = YES;
     [dummyView.layer addSublayer:pipLayer];
-    if (UIApplication.sharedApplication.windows.first.rootViewController.view) {
-        [UIApplication.sharedApplication.windows.first.rootViewController.view addSubview:dummyView];
+    if ([[UIApplication sharedApplication] windows].firstObject.rootViewController.view) {
+        [[[UIApplication sharedApplication] windows] firstObject].rootViewController.view addSubview:dummyView];
     }
     
     // Create PiP controller
-    AVPictureInPictureController *pipCtrl = [[AVPictureInPictureController alloc] initWithSampleBufferDisplayLayer:pipLayer source:nil];
+    AVPictureInPictureController *pipCtrl = [[AVPictureInPictureController alloc] initWithPlayerLayer:pipLayer];
     if (!pipCtrl) {
         [self.channel invokeMethod:@"nativeLog" arguments:@"Native: Failed to create AVPictureInPictureController"];
         return NO;
@@ -290,6 +306,7 @@ private:
     controller.pipLayer = pipLayer;
     controller.textureId = texId;
     controller.channel = self.channel;
+    controller.pipPlayer = avPlayer;  // Store for frame feeding
     pipCtrl.delegate = controller;
     
     if (@available(iOS 14.2, *)) {
@@ -299,36 +316,18 @@ private:
     
     _pipControllers[@(texId)] = controller;
     
-    // Bridge FFmpeg frames (hook into render callback)
-    player->setRenderCallback([this, pipLayer, texId](void* opaque){
-        // Get frame data from mdk::Player
-        MediaInfo info = players[texId]->mediaInfo();
-        if (info.video.empty()) return;
-        
-        // Create CVPixelBuffer for FFmpeg frame (simplified; assumes RGB)
-        CVPixelBufferRef pixelBuffer;
-        CVPixelBufferCreate(nil, info.video[0].width, info.video[0].height, kCVPixelFormatType_32BGRA, nil, &pixelBuffer);
-        
-        // Copy frame data (pseudo; needs actual FFmpeg AVFrame access)
-        // AVFrame *frame = players[texId]->getCurrentFrame(); // Requires mdk API exposure
-        // Copy frame->data to pixelBuffer (libavcodec conversion)
-        
-        // Create CMSampleBuffer
-        CMSampleTimingInfo timing = {
-            .presentationTimeStamp = CMTimeMake(1, 30), // Adjust based on frame rate
-            .duration = kCMTimeInvalid,
-            .decodeTimeStamp = kCMTimeInvalid
-        };
-        CMSampleBufferRef sampleBuffer;
-        CMSampleBufferCreateForImageBuffer(nil, pixelBuffer, YES, nil, nil, nil, &timing, &sampleBuffer);
-        
-        // Enqueue to sample buffer layer
-        [pipLayer enqueueSampleBuffer:sampleBuffer];
-        
-        CFRelease(pixelBuffer);
-        CFRelease(sampleBuffer);
-    });
+    // Configure audio session
+    do {
+        [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback 
+                                        withOptions:AVAudioSessionCategoryOptionMixWithOthers 
+                                              error:nil];
+        [[AVAudioSession sharedInstance] setActive:YES error:nil];
+        [self.channel invokeMethod:@"nativeLog" arguments:@"Native: Audio session configured"];
+    } catch (NSException *e) {
+        [self.channel invokeMethod:@"nativeLog" arguments:[NSString stringWithFormat:@"Native: Audio session error: %@", e.reason]];
+    }
     
+    // Placeholder for FFmpeg frame bridge (requires mdk API exposure)
     [self.channel invokeMethod:@"nativeLog" arguments:@"Native: PiP enabled for texture"];
     return YES;
 }
