@@ -119,11 +119,15 @@ public:
 
     int64_t textureId() const { return texId_;}
     
-    void syncFrameToPip() {
+    void TexturePlayer::syncFrameToPip() {
         if (!plugin_ || ![plugin_ getPipControllerForTexture:texId_].isPictureInPictureActive) return;
+        static int frameCount = 0;
         CVPixelBufferRef pixelBuffer = [mtex_ copyPixelBuffer];
         if (!pixelBuffer) {
-            [plugin_ sendLogToFlutter:@"Native: ⚠️ No pixel buffer"];
+            if (frameCount % 60 == 0) {
+                [plugin_ sendLogToFlutter:@"Native: ⚠️ No pixel buffer"];
+            }
+            frameCount++;
             return;
         }
         CMSampleBufferRef sampleBuffer = createSampleBufferFromPixelBuffer(pixelBuffer);
@@ -131,15 +135,22 @@ public:
             AVSampleBufferDisplayLayer *displayLayer = [plugin_ getDisplayLayerForTexture:texId_];
             if (displayLayer) {
                 [displayLayer enqueueSampleBuffer:sampleBuffer];
-                [plugin_ sendLogToFlutter:@"Native: ✅ Frame enqueued to PiP"];
+                if (frameCount % 60 == 0) {
+                    [plugin_ sendLogToFlutter:@"Native: ✅ Frame enqueued to PiP"];
+                }
             } else {
-                [plugin_ sendLogToFlutter:@"Native: ❌ No display layer"];
+                if (frameCount % 60 == 0) {
+                    [plugin_ sendLogToFlutter:@"Native: ❌ No display layer"];
+                }
             }
             CFRelease(sampleBuffer);
         } else {
-            [plugin_ sendLogToFlutter:@"Native: ❌ Failed to create sample buffer"];
+            if (frameCount % 60 == 0) {
+                [plugin_ sendLogToFlutter:@"Native: ❌ Failed to create sample buffer"];
+            }
         }
         CVPixelBufferRelease(pixelBuffer);
+        frameCount++;
     }
     
     CMSampleBufferRef createSampleBufferFromPixelBuffer(CVPixelBufferRef pixelBuffer) {
@@ -304,15 +315,17 @@ private:
     } else if ([call.method isEqualToString:@"exitPipMode"]) {
         NSLog(@"🔧 PiP: exitPipMode called");
         
-        // Use global PiP controller (key 0)
-        AVPictureInPictureController *pipController = [_pipControllers objectForKey:@(0)];
+        [self sendLogToFlutter:@"🔧 PiP: exitPipMode called"];
+        NSNumber *textureIdNum = call.arguments[@"textureId"];
+        int64_t textureId = [textureIdNum longLongValue];
+        AVPictureInPictureController *pipController = [_pipControllers objectForKey:@(textureId)];
         if (pipController) {
-            NSLog(@"🔧 PiP: Found controller, stopping Picture-in-Picture...");
-            NSLog(@"🔧 PiP: Is PiP active before stop: %@", pipController.isPictureInPictureActive ? @"YES" : @"NO");
+            [self sendLogToFlutter:[NSString stringWithFormat:@"🔧 PiP: Found controller, stopping Picture-in-Picture for texture %lld", textureId]];
+            [self sendLogToFlutter:[NSString stringWithFormat:@"🔧 PiP: Is PiP active before stop: %@", pipController.isPictureInPictureActive ? @"YES" : @"NO"]];
             [pipController stopPictureInPicture];
-            NSLog(@"✅ PiP: stopPictureInPicture called for global PiP");
+            [self sendLogToFlutter:[NSString stringWithFormat:@"✅ PiP: stopPictureInPicture called for texture %lld", textureId]];
         } else {
-            NSLog(@"⚠️ PiP: No controller found for global PiP");
+            [self sendLogToFlutter:@"⚠️ PiP: No controller found for texture"];
         }
         result(@YES);
     } else {
@@ -374,7 +387,7 @@ private:
 
 // Helper method to get PiP controller for global PiP
 - (AVPictureInPictureController*)getPipControllerForTexture:(int64_t)textureId {
-    return [_pipControllers objectForKey:@(0)];  // Always use global key 0
+    return [_pipControllers objectForKey:@(textureId)];
 }
 
 // Helper method to send logs to Flutter
@@ -386,12 +399,13 @@ private:
 // Helper method to cleanup PiP resources
 - (void)cleanupPipForTextureId:(int64_t)textureId {
     // Clean up global PiP resources (key 0)
-    NSNumber *globalKey = @(0);
+    NSNumber *key = @(textureId);
     
     // Stop PiP controller if active
     AVPictureInPictureController *pipController = [_pipControllers objectForKey:globalKey];
     if (pipController && pipController.isPictureInPictureActive) {
         [pipController stopPictureInPicture];
+        [self sendLogToFlutter:[NSString stringWithFormat:@"🧹 PiP: Stopped controller for texture %lld", textureId]];
     }
     [_pipControllers removeObjectForKey:globalKey];
     
@@ -404,8 +418,7 @@ private:
         [dummyView removeFromSuperview];
         [_pipDummyViews removeObjectForKey:globalKey];
     }
-    
-    NSLog(@"🧹 Cleaned up global PiP resources");
+    [self sendLogToFlutter:[NSString stringWithFormat:@"🧹 PiP: Cleaned up resources for texture %lld", textureId]];
 }
 
 // ios only, optional. called first in dealloc(texture registry is still alive). plugin instance must be registered via publish
