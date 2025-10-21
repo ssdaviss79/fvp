@@ -189,6 +189,14 @@ private:
     } else if ([call.method isEqualToString:@"MixWithOthers"]) {
         [[maybe_unused]] const auto value = ((NSNumber*)call.arguments[@"value"]).boolValue;
     } // NEW: PiP Methods
+    else if ([call.method isEqualToString:@"getTextureId"]) {
+        if (players.empty()) {
+            result(@(-1));
+            return;
+        }
+        auto it = players.rbegin();
+        result(@(it->first));
+    }
     else if ([call.method isEqualToString:@"isPipSupported"]) {
         BOOL supported = [AVPictureInPictureController isPictureInPictureSupported];
         result(@(supported));
