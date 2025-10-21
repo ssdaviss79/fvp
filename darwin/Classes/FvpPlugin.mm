@@ -118,11 +118,6 @@ private:
 @interface FvpPlugin () {
     unordered_map<int64_t, shared_ptr<TexturePlayer>> players;
 }
-@property (nonatomic, strong, readonly) NSObject<FlutterTextureRegistry> *texRegistry;
-@property (nonatomic, strong) FlutterMethodChannel *channel;
-@property (nonatomic, strong) NSMutableDictionary<NSNumber*, FvpPipController*> *pipControllers;
-- (BOOL)enablePipForTexture:(int64_t)texId;
-- (BOOL)enterPipModeForTexture:(int64_t)texId width:(int)width height:(int)height;
 @end
 
 @implementation FvpPipController
@@ -277,7 +272,7 @@ private:
     AVPlayer *avPlayer = [[AVPlayer alloc] init];
     
     // Create hidden AVPlayerLayer
-    AVPlayerLayer *pipLayer = [[AVPlayerLayer alloc] initWithPlayer:avPlayer];
+    AVPlayerLayer *pipLayer = [AVPlayerLayer playerLayerWithPlayer:avPlayer];
     pipLayer.videoGravity = AVLayerVideoGravityResizeAspect;
     pipLayer.frame = CGRectMake(0, 0, 1, 1);
     
@@ -285,8 +280,11 @@ private:
     UIView *dummyView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1, 1)];
     dummyView.hidden = YES;
     [dummyView.layer addSublayer:pipLayer];
-    if ([[UIApplication sharedApplication] windows].firstObject.rootViewController.view) {
-        [[[UIApplication sharedApplication] windows] firstObject].rootViewController.view addSubview:dummyView];
+    if ([UIApplication sharedApplication].windows.count > 0) {
+        UIWindow *window = [UIApplication sharedApplication].windows[0];
+        if (window.rootViewController.view) {
+            [window.rootViewController.view addSubview:dummyView];
+        }
     }
     
     // Create PiP controller
@@ -313,14 +311,19 @@ private:
     _pipControllers[@(texId)] = controller;
     
     // Configure audio session
-    do {
-        [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback 
-                                        withOptions:AVAudioSessionCategoryOptionMixWithOthers 
-                                              error:nil];
-        [[AVAudioSession sharedInstance] setActive:YES error:nil];
-        [self.channel invokeMethod:@"nativeLog" arguments:@"Native: Audio session configured"];
-    } catch (NSException *e) {
-        [self.channel invokeMethod:@"nativeLog" arguments:[NSString stringWithFormat:@"Native: Audio session error: %@", e.reason]];
+    NSError *error = nil;
+    [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback 
+                                    withOptions:AVAudioSessionCategoryOptionMixWithOthers 
+                                          error:&error];
+    if (error) {
+        [self.channel invokeMethod:@"nativeLog" arguments:[NSString stringWithFormat:@"Native: Audio session error: %@", error.localizedDescription]];
+    } else {
+        [[AVAudioSession sharedInstance] setActive:YES error:&error];
+        if (error) {
+            [self.channel invokeMethod:@"nativeLog" arguments:[NSString stringWithFormat:@"Native: Audio session activation error: %@", error.localizedDescription]];
+        } else {
+            [self.channel invokeMethod:@"nativeLog" arguments:@"Native: Audio session configured"];
+        }
     }
     
     // Placeholder for FFmpeg frame bridge (requires mdk API exposure)
