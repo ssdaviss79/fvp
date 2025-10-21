@@ -271,6 +271,10 @@ private:
     } else if ([call.method isEqualToString:@"enterPipMode"]) {
         NSLog(@"🔧 PiP: enterPipMode called");
         NSLog(@"🔧 PiP: Method call received in native code");
+        NSLog(@"🚨🚨🚨 NATIVE METHOD CALLED 🚨🚨🚨");
+        print("🔧 PiP: enterPipMode called");
+        print("🔧 PiP: Method call received in native code");
+        print("🚨🚨🚨 NATIVE METHOD CALLED 🚨🚨🚨");
         
         // Get parameters from Flutter
         NSNumber *widthNum = call.arguments[@"width"];
@@ -316,6 +320,13 @@ private:
         [pipController startPictureInPicture];
         
         NSLog(@"✅ PiP: startPictureInPicture called for global PiP");
+        
+        // Add a delay to check if PiP actually started
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            NSLog(@"🔧 PiP: Checking PiP status after 1 second...");
+            NSLog(@"🔧 PiP: Is PiP active: %@", pipController.isPictureInPictureActive ? @"YES" : @"NO");
+        });
+        
         result(@YES);
     } else if ([call.method isEqualToString:@"exitPipMode"]) {
         NSLog(@"🔧 PiP: exitPipMode called");
