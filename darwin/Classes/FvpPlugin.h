@@ -3,13 +3,5 @@
 #else
 #import <FlutterMacOS/FlutterMacOS.h>
 #endif
-#import <AVFoundation/AVFoundation.h>
-#import <AVKit/AVKit.h>
-
-@interface FvpPlugin : NSObject<FlutterPlugin, AVPictureInPictureControllerDelegate>
-- (AVSampleBufferDisplayLayer*)getDisplayLayerForTexture:(int64_t)textureId;
-- (AVPictureInPictureController*)getPipControllerForTexture:(int64_t)textureId;
-- (void)sendLogToFlutter:(NSString*)message;
-- (void)sendErrorToFlutter:(NSString*)errorType message:(NSString*)message details:(NSDictionary*)details;
-- (void)cleanupPipForTextureId:(int64_t)textureId;
+@interface FvpPlugin : NSObject<FlutterPlugin>
 @end
