@@ -8,9 +8,7 @@
 #include "mdk/RenderAPI.h"
 #include "mdk/Player.h"
 #import <AVFoundation/AVFoundation.h>
-#import <AVKit/AVKit.h>
 #import <CoreVideo/CoreVideo.h>
-#import <CoreMedia/CoreMedia.h>
 #import <Metal/Metal.h>
 #include <mutex>
 #include <unordered_map>
@@ -19,55 +17,33 @@
 using namespace mdk;
 using namespace std;
 
-@interface FvpPipPlaybackDelegate : NSObject <AVPictureInPictureSampleBufferPlaybackDelegate>
-@property (nonatomic, weak) FvpPlugin* plugin;
-@end
-
-@implementation FvpPipPlaybackDelegate
-- (instancetype)initWithPlugin:(FvpPlugin*)plugin {
-    self = [super init];
-    self.plugin = plugin;
-    return self;
-}
-
-- (BOOL)pictureInPictureControllerIsPlaybackPaused:(AVPictureInPictureController *)controller {
-    return NO; // Always playing; mdk controls playback
-}
-
-- (CMTimeRange)pictureInPictureControllerTimeRangeForPlayback:(AVPictureInPictureController *)controller {
-    return CMTimeRangeMake(kCMTimeZero, kCMTimePositiveInfinity);
-}
-
-- (void)pictureInPictureController:(AVPictureInPictureController *)controller setPlaying:(BOOL)playing {
-    [self.plugin sendLogToFlutter:[NSString stringWithFormat:@"🔄 PiP: Set playing: %d", playing]];
-}
-@end
-
 @interface MetalTexture : NSObject<FlutterTexture>
 @end
 
 @implementation MetalTexture {
-@public
+    @public
     id<MTLDevice> device;
     id<MTLCommandQueue> cmdQueue;
     id<MTLTexture> texture;
     CVPixelBufferRef pixbuf;
     id<MTLTexture> fltex;
     CVMetalTextureCacheRef texCache;
-    mutex mtx;
+    mutex mtx; // ensure whole frame render pass commands are recorded before blitting
 }
 
-- (instancetype)initWithWidth:(int)width height:(int)height {
+- (instancetype)initWithWidth:(int)width height:(int)height
+{
     self = [super init];
     device = MTLCreateSystemDefaultDevice();
     cmdQueue = [device newCommandQueue];
     auto td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:width height:height mipmapped:NO];
     td.usage = MTLTextureUsageRenderTarget;
     texture = [device newTextureWithDescriptor:td];
+    //assert(!texture.iosurface); // CVPixelBufferCreateWithIOSurface(fltex.iosurface)
     auto attr = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     CFDictionarySetValue(attr, kCVPixelBufferMetalCompatibilityKey, kCFBooleanTrue);
     auto iosurface_props = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFDictionarySetValue(attr, kCVPixelBufferIOSurfacePropertiesKey, iosurface_props);
+    CFDictionarySetValue(attr, kCVPixelBufferIOSurfacePropertiesKey, iosurface_props); // optional?
     CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, attr, &pixbuf);
     CFRelease(attr);
     texCache = {};
@@ -79,7 +55,9 @@ using namespace std;
     CFRelease(cvtex);
 #else
     auto iosurface = CVPixelBufferGetIOSurface(pixbuf);
-    td.usage = MTLTextureUsageShaderRead;
+    td.usage = MTLTextureUsageShaderRead; // Unknown?
+// macos: failed assertion `Texture Descriptor Validation IOSurface textures must use MTLStorageModeManaged or MTLStorageModeShared'
+// ios: failed assertion `Texture Descriptor Validation IOSurface textures must use MTLStorageModeShared
     fltex = [device newTextureWithDescriptor:td iosurface:iosurface plane:0];
 #endif
     return self;
@@ -87,44 +65,44 @@ using namespace std;
 
 - (void)dealloc {
     CVPixelBufferRelease(pixbuf);
-    if (texCache) CFRelease(texCache);
+    if (texCache)
+        CFRelease(texCache);
 }
 
 - (CVPixelBufferRef _Nullable)copyPixelBuffer {
+    //return CVPixelBufferRetain(pixbuf);
     scoped_lock lock(mtx);
-    if (!texture || !fltex || !pixbuf) {
-        NSLog(@"❌ MetalTexture: Invalid texture or pixbuf");
-        return nil;
-    }
     auto cmdbuf = [cmdQueue commandBuffer];
     auto blit = [cmdbuf blitCommandEncoder];
     [blit copyFromTexture:texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(texture.width, texture.height, texture.depth)
-        toTexture:fltex destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+        toTexture:fltex destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)]; // macos 10.15
     [blit endEncoding];
-    [cmdbuf commit];
+	[cmdbuf commit];
     return CVPixelBufferRetain(pixbuf);
 }
 @end
 
-class TexturePlayer final: public Player {
+
+class TexturePlayer final: public Player
+{
 public:
-    TexturePlayer(int64_t handle, int width, int height, NSObject<FlutterTextureRegistry>* texReg, FvpPlugin* plugin)
-        : Player(reinterpret_cast<mdkPlayerAPI*>(handle)) {
+    TexturePlayer(int64_t handle, int width, int height, NSObject<FlutterTextureRegistry>* texReg)
+        : Player(reinterpret_cast<mdkPlayerAPI*>(handle))
+    {
         mtex_ = [[MetalTexture alloc] initWithWidth:width height:height];
         texId_ = [texReg registerTexture:mtex_];
-        plugin_ = plugin;
         MetalRenderAPI ra{};
         ra.device = (__bridge void*)mtex_->device;
         ra.cmdQueue = (__bridge void*)mtex_->cmdQueue;
+// TODO: texture pool to avoid blitting
         ra.texture = (__bridge void*)mtex_->texture;
         setRenderAPI(&ra);
         setVideoSurfaceSize(width, height);
 
-        setRenderCallback([this, texReg](void* opaque) {
+        setRenderCallback([this, texReg](void* opaque){
             scoped_lock lock(mtex_->mtx);
             renderVideo();
             [texReg textureFrameAvailable:texId_];
-            syncFrameToPip();
         });
     }
 
@@ -133,84 +111,17 @@ public:
         setVideoSurfaceSize(-1, -1);
     }
 
-    int64_t textureId() const { return texId_; }
-
-    void syncFrameToPip() {
-        if (!plugin_ || ![plugin_ getPipControllerForTexture:texId_].isPictureInPictureActive) return;
-        static int frameCount = 0;
-        CVPixelBufferRef pixelBuffer = [mtex_ copyPixelBuffer];
-        if (!pixelBuffer) {
-            if (frameCount % 60 == 0) {
-                [plugin_ sendLogToFlutter:@"Native: ⚠️ No pixel buffer"];
-                [plugin_ sendErrorToFlutter:@"PiPError" message:@"No pixel buffer in syncFrameToPip" details:nil];
-            }
-            frameCount++;
-            return;
-        }
-        CMSampleBufferRef sampleBuffer = createSampleBufferFromPixelBuffer(pixelBuffer);
-        if (sampleBuffer) {
-            AVSampleBufferDisplayLayer *displayLayer = [plugin_ getDisplayLayerForTexture:texId_];
-            if (displayLayer) {
-                [displayLayer enqueueSampleBuffer:sampleBuffer];
-                if (frameCount % 60 == 0) {
-                    [plugin_ sendLogToFlutter:@"Native: ✅ Frame enqueued to PiP"];
-                }
-            } else {
-                if (frameCount % 60 == 0) {
-                    [plugin_ sendLogToFlutter:@"Native: ❌ No display layer"];
-                    [plugin_ sendErrorToFlutter:@"PiPError" message:@"No display layer in syncFrameToPip" details:nil];
-                }
-            }
-            CFRelease(sampleBuffer);
-        } else {
-            if (frameCount % 60 == 0) {
-                [plugin_ sendLogToFlutter:@"Native: ❌ Failed to create sample buffer"];
-                [plugin_ sendErrorToFlutter:@"PiPError" message:@"Failed to create sample buffer" details:nil];
-            }
-        }
-        CVPixelBufferRelease(pixelBuffer);
-        frameCount++;
-    }
-
-    CMSampleBufferRef createSampleBufferFromPixelBuffer(CVPixelBufferRef pixelBuffer) {
-        CMVideoFormatDescriptionRef formatDesc;
-        OSStatus status = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pixelBuffer, &formatDesc);
-        if (status != noErr) {
-            [plugin_ sendLogToFlutter:@"Native: ❌ Failed to create format description"];
-            [plugin_ sendErrorToFlutter:@"PiPError" message:@"Failed to create format description" details:@{@"status": @(status)}];
-            return NULL;
-        }
-        CMTime timestamp = CMTimeMakeWithSeconds(CACurrentMediaTime(), 1000000);
-        CMSampleTimingInfo timingInfo = {
-            .duration = kCMTimeInvalid,
-            .presentationTimeStamp = timestamp,
-            .decodeTimeStamp = kCMTimeInvalid
-        };
-        CMSampleBufferRef sampleBuffer;
-        status = CMSampleBufferCreateForImageBuffer(kCFAllocatorDefault, pixelBuffer, true, NULL, NULL, formatDesc, &timingInfo, &sampleBuffer);
-        CFRelease(formatDesc);
-        if (status != noErr) {
-            [plugin_ sendLogToFlutter:@"Native: ❌ Failed to create sample buffer"];
-            [plugin_ sendErrorToFlutter:@"PiPError" message:@"Failed to create sample buffer" details:@{@"status": @(status)}];
-            return NULL;
-        }
-        return sampleBuffer;
-    }
-
+    int64_t textureId() const { return texId_;}
 private:
     int64_t texId_ = 0;
     MetalTexture* mtex_ = nil;
-    __weak FvpPlugin* plugin_;
 };
 
-@interface FvpPlugin () <AVPictureInPictureControllerDelegate> {
+
+@interface FvpPlugin () {
     unordered_map<int64_t, shared_ptr<TexturePlayer>> players;
 }
 @property(readonly, strong, nonatomic) NSObject<FlutterTextureRegistry>* texRegistry;
-@property(strong, nonatomic) NSMutableDictionary<NSNumber*, AVPictureInPictureController*>* pipControllers;
-@property(strong, nonatomic) NSMutableDictionary<NSNumber*, AVSampleBufferDisplayLayer*>* pipLayers;
-@property(strong, nonatomic) NSMutableDictionary<NSNumber*, UIView*>* pipDummyViews;
-@property(strong, nonatomic) FlutterMethodChannel* channel;
 @end
 
 @implementation FvpPlugin
@@ -219,14 +130,14 @@ private:
     auto messenger = registrar.messenger;
 #else
     auto messenger = [registrar messenger];
+  // Allow audio playback when the Ring/Silent switch is set to silent
     [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback error:nil];
 #endif
     FlutterMethodChannel* channel = [FlutterMethodChannel methodChannelWithName:@"fvp" binaryMessenger:messenger];
     FvpPlugin* instance = [[FvpPlugin alloc] initWithRegistrar:registrar];
-    instance.channel = channel;
 #if TARGET_OS_OSX
 #else
-    [registrar addApplicationDelegate:instance];
+  [registrar addApplicationDelegate:instance];
 #endif
     [registrar publish:instance];
     [registrar addMethodCallDelegate:instance channel:channel];
@@ -240,55 +151,21 @@ private:
 #else
     _texRegistry = [registrar textures];
 #endif
-    _pipControllers = [NSMutableDictionary dictionary];
-    _pipLayers = [NSMutableDictionary dictionary];
-    _pipDummyViews = [NSMutableDictionary dictionary];
-    _channel = [FlutterMethodChannel methodChannelWithName:@"fvp" binaryMessenger:[registrar messenger]];
     return self;
 }
 
 - (void)handleMethodCall:(FlutterMethodCall*)call result:(FlutterResult)result {
-    if ([call.method isEqualToString:@"test"]) {
-        [self sendLogToFlutter:@"✅ Test channel call succeeded"];
-        result(@YES);
-    } else if ([call.method isEqualToString:@"isPipSupported"]) {
-        BOOL supported = [AVPictureInPictureController isPictureInPictureSupported];
-        [self sendLogToFlutter:[NSString stringWithFormat:@"✅ PiP: Picture-in-Picture supported: %d", supported]];
-        if (!supported) {
-            [self sendErrorToFlutter:@"PiPError" message:@"Picture-in-Picture not supported" details:nil];
-        }
-        result(@(supported));
-        return;
-    } else if ([call.method isEqualToString:@"CreateRT"]) {
+    if ([call.method isEqualToString:@"CreateRT"]) {
         const auto handle = ((NSNumber*)call.arguments[@"player"]).longLongValue;
         const auto width = ((NSNumber*)call.arguments[@"width"]).intValue;
         const auto height = ((NSNumber*)call.arguments[@"height"]).intValue;
-        if (width <= 0 || height <= 0) {
-            [self sendLogToFlutter:@"❌ CreateRT: Invalid dimensions"];
-            [self sendErrorToFlutter:@"CreateRTError" message:@"Invalid width or height" details:@{@"width": @(width), @"height": @(height)}];
-            result([FlutterError errorWithCode:@"INVALID_DIMENSIONS" message:@"Width and height must be positive" details:nil]);
-            return;
-        }
-        @try {
-            auto player = make_shared<TexturePlayer>(handle, width, height, _texRegistry, self);
-            if (!player) {
-                [self sendLogToFlutter:@"❌ CreateRT: Failed to create TexturePlayer"];
-                [self sendErrorToFlutter:@"CreateRTError" message:@"Failed to create TexturePlayer" details:nil];
-                result([FlutterError errorWithCode:@"PLAYER_CREATION_FAILED" message:@"Failed to create player" details:nil]);
-                return;
-            }
-            players[player->textureId()] = player;
-            result(@(player->textureId()));
-        } @catch (NSException *exception) {
-            [self sendLogToFlutter:[NSString stringWithFormat:@"❌ CreateRT: Exception: %@", exception.reason]];
-            [self sendErrorToFlutter:@"CreateRTError" message:[NSString stringWithFormat:@"Exception in CreateRT: %@", exception.reason] details:@{@"name": exception.name}];
-            result([FlutterError errorWithCode:@"CREATE_RT_EXCEPTION" message:exception.reason details:nil]);
-        }
+        auto player = make_shared<TexturePlayer>(handle, width, height, _texRegistry);
+        players[player->textureId()] = player;
+        result(@(player->textureId()));
     } else if ([call.method isEqualToString:@"ReleaseRT"]) {
         const auto texId = ((NSNumber*)call.arguments[@"texture"]).longLongValue;
         [_texRegistry unregisterTexture:texId];
         players.erase(texId);
-        [self cleanupPipForTextureId:texId];
         result(nil);
     } else if ([call.method isEqualToString:@"MixWithOthers"]) {
         [[maybe_unused]] const auto value = ((NSNumber*)call.arguments[@"value"]).boolValue;
@@ -301,191 +178,20 @@ private:
         }
 #endif
         result(nil);
-    } else if ([call.method isEqualToString:@"enablePipForTexture"]) {
-        [self sendLogToFlutter:@"🔧 PiP: enablePipForTexture called"];
-        if (![AVPictureInPictureController isPictureInPictureSupported]) {
-            [self sendLogToFlutter:@"❌ PiP: Picture-in-Picture not supported"];
-            [self sendErrorToFlutter:@"PiPError" message:@"Picture-in-Picture not supported" details:nil];
-            result([FlutterError errorWithCode:@"NOT_SUPPORTED" message:@"PiP not supported" details:nil]);
-            return;
-        }
-        NSNumber *textureIdNum = call.arguments[@"textureId"];
-        int64_t textureId = [textureIdNum longLongValue];
-        auto it = players.find(textureId);
-        if (it == players.end()) {
-            [self sendLogToFlutter:@"❌ PiP: Texture not found"];
-            [self sendErrorToFlutter:@"PiPError" message:@"Texture not found" details:@{@"textureId": @(textureId)}];
-            result([FlutterError errorWithCode:@"NO_TEXTURE" message:@"Texture not found" details:nil]);
-            return;
-        }
-        int width = [call.arguments[@"width"] intValue] ?: 640;
-        int height = [call.arguments[@"height"] intValue] ?: 360;
-        AVSampleBufferDisplayLayer *displayLayer = [AVSampleBufferDisplayLayer layer];
-        displayLayer.videoGravity = AVLayerVideoGravityResizeAspect;
-        displayLayer.frame = CGRectMake(0, 0, width, height);
-        displayLayer.hidden = YES;
-        UIView *dummyView = [[UIView alloc] initWithFrame:displayLayer.frame];
-        [dummyView.layer addSublayer:displayLayer];
-        dummyView.hidden = YES;
-        [[UIApplication sharedApplication].windows.firstObject.rootViewController.view addSubview:dummyView];
-        [_pipLayers setObject:displayLayer forKey:@(textureId)];
-        [_pipDummyViews setObject:dummyView forKey:@(textureId)];
-        [self sendLogToFlutter:@"✅ PiP: Created display layer for texture"];
-        result(@YES);
-    } else if ([call.method isEqualToString:@"enterPipMode"]) {
-        NSNumber *textureIdNum = call.arguments[@"textureId"];
-        int64_t textureId = [textureIdNum longLongValue];
-        [self sendLogToFlutter:[NSString stringWithFormat:@"🔧 PiP: enterPipMode called - textureId: %lld, size: %@x%@", textureId, call.arguments[@"width"], call.arguments[@"height"]]];
-        AVSampleBufferDisplayLayer *displayLayer = [_pipLayers objectForKey:@(textureId)];
-        if (!displayLayer) {
-            [self sendLogToFlutter:@"❌ PiP: No display layer"];
-            [self sendErrorToFlutter:@"PiPError" message:@"No display layer" details:@{@"textureId": @(textureId)}];
-            result([FlutterError errorWithCode:@"NO_LAYER" message:@"PiP not enabled" details:nil]);
-            return;
-        }
-        AVPictureInPictureControllerContentSource *contentSource;
-        if (@available(iOS 15.0, *)) {
-            FvpPipPlaybackDelegate *playbackDelegate = [[FvpPipPlaybackDelegate alloc] initWithPlugin:self];
-            contentSource = [[AVPictureInPictureControllerContentSource alloc] initWithSampleBufferDisplayLayer:displayLayer playbackDelegate:playbackDelegate];
-        } else {
-            [self sendLogToFlutter:@"❌ PiP: iOS 15+ required for SampleBufferDisplayLayer"];
-            [self sendErrorToFlutter:@"PiPError" message:@"iOS 15+ required for SampleBufferDisplayLayer" details:nil];
-            result([FlutterError errorWithCode:@"UNSUPPORTED_OS" message:@"iOS 15+ required" details:nil]);
-            return;
-        }
-        AVPictureInPictureController *pipController = [[AVPictureInPictureController alloc] initWithContentSource:contentSource];
-        if (!pipController) {
-            [self sendLogToFlutter:@"❌ PiP: Failed to create AVPictureInPictureController"];
-            [self sendErrorToFlutter:@"PiPError" message:@"Failed to create AVPictureInPictureController" details:nil];
-            result([FlutterError errorWithCode:@"NO_CONTROLLER" message:@"Failed to create PiP controller" details:nil]);
-            return;
-        }
-        pipController.delegate = self;
-        if (@available(iOS 14.2, *)) {
-            pipController.canStartPictureInPictureAutomaticallyFromInline = YES;
-            [self sendLogToFlutter:@"✅ PiP: Auto-PiP enabled"];
-        }
-        [_pipControllers setObject:pipController forKey:@(textureId)];
-        if (pipController.isPictureInPicturePossible) {
-            [pipController startPictureInPicture];
-            [self sendLogToFlutter:@"✅ PiP: Started Picture-in-Picture"];
-            result(@YES);
-        } else {
-            [self sendLogToFlutter:@"❌ PiP: Not possible"];
-            [self sendErrorToFlutter:@"PiPError" message:@"PiP not possible" details:nil];
-            result(@NO);
-        }
-    } else if ([call.method isEqualToString:@"exitPipMode"]) {
-        [self sendLogToFlutter:@"🔧 PiP: exitPipMode called"];
-        NSNumber *textureIdNum = call.arguments[@"textureId"];
-        int64_t textureId = [textureIdNum longLongValue];
-        AVPictureInPictureController *pipController = [_pipControllers objectForKey:@(textureId)];
-        if (pipController) {
-            [self sendLogToFlutter:[NSString stringWithFormat:@"🔧 PiP: Found controller, stopping Picture-in-Picture for texture %lld", textureId]];
-            [self sendLogToFlutter:[NSString stringWithFormat:@"🔧 PiP: Is PiP active before stop: %@", pipController.isPictureInPictureActive ? @"YES" : @"NO"]];
-            [pipController stopPictureInPicture];
-            [self sendLogToFlutter:[NSString stringWithFormat:@"✅ PiP: stopPictureInPicture called for texture %lld", textureId]];
-        } else {
-            [self sendLogToFlutter:@"⚠️ PiP: No controller found for texture"];
-            [self sendErrorToFlutter:@"PiPError" message:@"No controller found for texture" details:@{@"textureId": @(textureId)}];
-        }
-        result(@YES);
     } else {
         result(FlutterMethodNotImplemented);
     }
 }
 
-- (void)pictureInPictureControllerWillStartPictureInPicture:(AVPictureInPictureController *)controller {
-    [self sendLogToFlutter:@"🔄 PiP: Will start"];
-}
-
-- (void)pictureInPictureControllerDidStartPictureInPicture:(AVPictureInPictureController *)controller {
-    [self sendLogToFlutter:@"✅ PiP: Did start"];
-    [self.channel invokeMethod:@"onPipStateChanged" arguments:@YES];
-}
-
-- (void)pictureInPictureControllerWillStopPictureInPicture:(AVPictureInPictureController *)controller {
-    [self sendLogToFlutter:@"🔄 PiP: Will stop"];
-}
-
-- (void)pictureInPictureControllerDidStopPictureInPicture:(AVPictureInPictureController *)controller {
-    [self sendLogToFlutter:@"✅ PiP: Did stop"];
-    [self.channel invokeMethod:@"onPipStateChanged" arguments:@NO];
-}
-
-- (void)pictureInPictureController:(AVPictureInPictureController *)controller failedToStartPictureInPictureWithError:(NSError *)error {
-    [self sendLogToFlutter:[NSString stringWithFormat:@"❌ PiP: Failed to start: %@", error.localizedDescription]];
-    [self sendErrorToFlutter:@"PiPError" message:[NSString stringWithFormat:@"Failed to start PiP: %@", error.localizedDescription] details:@{@"code": @(error.code)}];
-    if (error.code == -1001) {
-        [self sendLogToFlutter:@"Native: Error - PiP already active"];
-    } else if (error.code == -1002) {
-        [self sendLogToFlutter:@"Native: Error - PiP disabled"];
-    }
-}
-
-- (void)pictureInPictureController:(AVPictureInPictureController *)controller restoreUserInterfaceForPictureInPictureStopWithCompletionHandler:(void (^)(BOOL))completionHandler {
-    [self sendLogToFlutter:@"🔄 PiP: Restore UI for stop"];
-    NSError *error;
-    if (![[AVAudioSession sharedInstance] setActive:YES withOptions:0 error:&error]) {
-        [self sendLogToFlutter:[NSString stringWithFormat:@"Native: Failed to reactivate audio: %@", error.localizedDescription]];
-        [self sendErrorToFlutter:@"PiPError" message:[NSString stringWithFormat:@"Failed to reactivate audio: %@", error.localizedDescription] details:@{@"code": @(error.code)}];
-    }
-    completionHandler(YES);
-}
-
-- (AVSampleBufferDisplayLayer*)getDisplayLayerForTexture:(int64_t)textureId {
-    return [_pipLayers objectForKey:@(textureId)];
-}
-
-- (AVPictureInPictureController*)getPipControllerForTexture:(int64_t)textureId {
-    return [_pipControllers objectForKey:@(textureId)];
-}
-
-- (void)sendLogToFlutter:(NSString*)message {
-    NSLog(@"%@", message);
-    [self.channel invokeMethod:@"nativeLog" arguments:message];
-}
-
-- (void)sendErrorToFlutter:(NSString*)errorType message:(NSString*)message details:(NSDictionary*)details {
-    NSDictionary *errorData = @{
-        @"errorType": errorType,
-        @"message": message,
-        @"details": details ?: @{}
-    };
-    [self.channel invokeMethod:@"nativeError" arguments:errorData];
-}
-
-- (void)cleanupPipForTextureId:(int64_t)textureId {
-    NSNumber *key = @(textureId);
-    AVPictureInPictureController *pipController = [_pipControllers objectForKey:key];
-    if (pipController && pipController.isPictureInPictureActive) {
-        [pipController stopPictureInPicture];
-        [self sendLogToFlutter:[NSString stringWithFormat:@"🧹 PiP: Stopped controller for texture %lld", textureId]];
-    }
-    [_pipControllers removeObjectForKey:key];
-    [_pipLayers removeObjectForKey:key];
-    UIView *dummyView = [_pipDummyViews objectForKey:key];
-    if (dummyView) {
-        [dummyView removeFromSuperview];
-        [_pipDummyViews removeObjectForKey:key];
-    }
-    [self sendLogToFlutter:[NSString stringWithFormat:@"🧹 PiP: Cleaned up resources for texture %lld", textureId]];
-}
-
+// ios only, optional. called first in dealloc(texture registry is still alive). plugin instance must be registered via publish
 - (void)detachFromEngineForRegistrar:(NSObject<FlutterPluginRegistrar> *)registrar {
-    players.clear();
-    for (auto& pair : players) {
-        [self cleanupPipForTextureId:pair.first];
-    }
+  players.clear();
 }
 
 #if TARGET_OS_OSX
 #else
 - (void)applicationWillTerminate:(UIApplication *)application {
-    players.clear();
-    for (auto& pair : players) {
-        [self cleanupPipForTextureId:pair.first];
-    }
+  players.clear();
 }
 #endif
 @end
