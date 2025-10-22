@@ -19,7 +19,6 @@
 using namespace mdk;
 using namespace std;
 
-// Playback delegate for AVPictureInPictureController
 @interface FvpPipPlaybackDelegate : NSObject <AVPictureInPictureSampleBufferPlaybackDelegate>
 @property (nonatomic, weak) FvpPlugin* plugin;
 @end
@@ -32,16 +31,15 @@ using namespace std;
 }
 
 - (BOOL)pictureInPictureControllerIsPlaybackPaused:(AVPictureInPictureController *)controller {
-    return NO; // Always playing; mdk controls actual playback
+    return NO; // Always playing; mdk controls playback
 }
 
 - (CMTimeRange)pictureInPictureControllerTimeRangeForPlayback:(AVPictureInPictureController *)controller {
-    return CMTimeRangeMake(kCMTimeZero, kCMTimePositiveInfinity); // Continuous playback
+    return CMTimeRangeMake(kCMTimeZero, kCMTimePositiveInfinity);
 }
 
 - (void)pictureInPictureController:(AVPictureInPictureController *)controller setPlaying:(BOOL)playing {
     [self.plugin sendLogToFlutter:[NSString stringWithFormat:@"🔄 PiP: Set playing: %d", playing]];
-    // Optionally pause/resume mdk::Player via plugin
 }
 @end
 
@@ -61,68 +59,30 @@ using namespace std;
 
 - (instancetype)initWithWidth:(int)width height:(int)height {
     self = [super init];
-    
-    @try {
-        NSLog(@"🔧 FVP: MetalTexture initWithWidth:%d height:%d", width, height);
-        
-        device = MTLCreateSystemDefaultDevice();
-        if (!device) {
-            NSLog(@"❌ FVP: Failed to create Metal device");
-            return nil;
-        }
-        
-        cmdQueue = [device newCommandQueue];
-        if (!cmdQueue) {
-            NSLog(@"❌ FVP: Failed to create command queue");
-            return nil;
-        }
-        
-        auto td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:width height:height mipmapped:NO];
-        td.usage = MTLTextureUsageRenderTarget;
-        texture = [device newTextureWithDescriptor:td];
-        if (!texture) {
-            NSLog(@"❌ FVP: Failed to create Metal texture");
-            return nil;
-        }
-        
-        auto attr = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-        CFDictionarySetValue(attr, kCVPixelBufferMetalCompatibilityKey, kCFBooleanTrue);
-        auto iosurface_props = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-        CFDictionarySetValue(attr, kCVPixelBufferIOSurfacePropertiesKey, iosurface_props);
-        
-        CVReturn result = CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, attr, &pixbuf);
-        CFRelease(attr);
-        
-        if (result != kCVReturnSuccess || !pixbuf) {
-            NSLog(@"❌ FVP: Failed to create pixel buffer, CVReturn: %d", result);
-            return nil;
-        }
-        
-        texCache = {};
+    device = MTLCreateSystemDefaultDevice();
+    cmdQueue = [device newCommandQueue];
+    auto td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:width height:height mipmapped:NO];
+    td.usage = MTLTextureUsageRenderTarget;
+    texture = [device newTextureWithDescriptor:td];
+    auto attr = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(attr, kCVPixelBufferMetalCompatibilityKey, kCFBooleanTrue);
+    auto iosurface_props = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionarySetValue(attr, kCVPixelBufferIOSurfacePropertiesKey, iosurface_props);
+    CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, attr, &pixbuf);
+    CFRelease(attr);
+    texCache = {};
 #if (USE_TEXCACHE + 0)
-        CVMetalTextureCacheCreate(nullptr, nullptr, device, nullptr, &texCache);
-        CVMetalTextureRef cvtex;
-        CVMetalTextureCacheCreateTextureFromImage(nil, texCache, pixbuf, nil, MTLPixelFormatBGRA8Unorm, width, height, 0, &cvtex);
-        fltex = CVMetalTextureGetTexture(cvtex);
-        CFRelease(cvtex);
+    CVMetalTextureCacheCreate(nullptr, nullptr, device, nullptr, &texCache);
+    CVMetalTextureRef cvtex;
+    CVMetalTextureCacheCreateTextureFromImage(nil, texCache, pixbuf, nil, MTLPixelFormatBGRA8Unorm, width, height, 0, &cvtex);
+    fltex = CVMetalTextureGetTexture(cvtex);
+    CFRelease(cvtex);
 #else
-        auto iosurface = CVPixelBufferGetIOSurface(pixbuf);
-        td.usage = MTLTextureUsageShaderRead;
-        fltex = [device newTextureWithDescriptor:td iosurface:iosurface plane:0];
+    auto iosurface = CVPixelBufferGetIOSurface(pixbuf);
+    td.usage = MTLTextureUsageShaderRead;
+    fltex = [device newTextureWithDescriptor:td iosurface:iosurface plane:0];
 #endif
-        
-        if (!fltex) {
-            NSLog(@"❌ FVP: Failed to create Flutter texture");
-            return nil;
-        }
-        
-        NSLog(@"✅ FVP: MetalTexture created successfully");
-        return self;
-        
-    } @catch (NSException *exception) {
-        NSLog(@"❌ FVP: MetalTexture exception: %@", exception.reason);
-        return nil;
-    }
+    return self;
 }
 
 - (void)dealloc {
@@ -132,6 +92,10 @@ using namespace std;
 
 - (CVPixelBufferRef _Nullable)copyPixelBuffer {
     scoped_lock lock(mtx);
+    if (!texture || !fltex || !pixbuf) {
+        NSLog(@"❌ MetalTexture: Invalid texture or pixbuf");
+        return nil;
+    }
     auto cmdbuf = [cmdQueue commandBuffer];
     auto blit = [cmdbuf blitCommandEncoder];
     [blit copyFromTexture:texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(texture.width, texture.height, texture.depth)
@@ -146,54 +110,22 @@ class TexturePlayer final: public Player {
 public:
     TexturePlayer(int64_t handle, int width, int height, NSObject<FlutterTextureRegistry>* texReg, FvpPlugin* plugin)
         : Player(reinterpret_cast<mdkPlayerAPI*>(handle)) {
-        try {
-            [plugin sendLogToFlutter:[NSString stringWithFormat:@"🔧 FVP: TexturePlayer constructor - handle: %lld, size: %dx%d", handle, width, height]];
-            
-            mtex_ = [[MetalTexture alloc] initWithWidth:width height:height];
-            if (!mtex_) {
-                [plugin sendErrorToServer:@"FVP_METAL_TEXTURE_FAILED" message:@"Failed to create MetalTexture" additionalData:@{
-                    @"handle": @(handle),
-                    @"width": @(width),
-                    @"height": @(height)
-                }];
-                throw std::runtime_error("Failed to create MetalTexture");
-            }
-            
-            texId_ = [texReg registerTexture:mtex_];
-            if (texId_ == 0) {
-                [plugin sendErrorToServer:@"FVP_TEXTURE_REGISTRATION_FAILED" message:@"Failed to register texture" additionalData:@{
-                    @"handle": @(handle),
-                    @"width": @(width),
-                    @"height": @(height)
-                }];
-                throw std::runtime_error("Failed to register texture");
-            }
-            
-            plugin_ = plugin;
-            MetalRenderAPI ra{};
-            ra.device = (__bridge void*)mtex_->device;
-            ra.cmdQueue = (__bridge void*)mtex_->cmdQueue;
-            ra.texture = (__bridge void*)mtex_->texture;
-            setRenderAPI(&ra);
-            setVideoSurfaceSize(width, height);
+        mtex_ = [[MetalTexture alloc] initWithWidth:width height:height];
+        texId_ = [texReg registerTexture:mtex_];
+        plugin_ = plugin;
+        MetalRenderAPI ra{};
+        ra.device = (__bridge void*)mtex_->device;
+        ra.cmdQueue = (__bridge void*)mtex_->cmdQueue;
+        ra.texture = (__bridge void*)mtex_->texture;
+        setRenderAPI(&ra);
+        setVideoSurfaceSize(width, height);
 
-            setRenderCallback([this, texReg](void* opaque) {
-                scoped_lock lock(mtex_->mtx);
-                renderVideo();
-                [texReg textureFrameAvailable:texId_];
-                syncFrameToPip();
-            });
-            
-            [plugin sendLogToFlutter:[NSString stringWithFormat:@"✅ FVP: TexturePlayer created successfully - textureId: %lld", texId_]];
-        } catch (const std::exception& e) {
-            [plugin sendErrorToServer:@"FVP_TEXTURE_PLAYER_CRASH" message:[NSString stringWithFormat:@"TexturePlayer constructor failed: %s", e.what()] additionalData:@{
-                @"handle": @(handle),
-                @"width": @(width),
-                @"height": @(height),
-                @"exception": [NSString stringWithUTF8String:e.what()]
-            }];
-            throw;
-        }
+        setRenderCallback([this, texReg](void* opaque) {
+            scoped_lock lock(mtex_->mtx);
+            renderVideo();
+            [texReg textureFrameAvailable:texId_];
+            syncFrameToPip();
+        });
     }
 
     ~TexturePlayer() override {
@@ -210,6 +142,7 @@ public:
         if (!pixelBuffer) {
             if (frameCount % 60 == 0) {
                 [plugin_ sendLogToFlutter:@"Native: ⚠️ No pixel buffer"];
+                [plugin_ sendErrorToFlutter:@"PiPError" message:@"No pixel buffer in syncFrameToPip" details:nil];
             }
             frameCount++;
             return;
@@ -225,12 +158,14 @@ public:
             } else {
                 if (frameCount % 60 == 0) {
                     [plugin_ sendLogToFlutter:@"Native: ❌ No display layer"];
+                    [plugin_ sendErrorToFlutter:@"PiPError" message:@"No display layer in syncFrameToPip" details:nil];
                 }
             }
             CFRelease(sampleBuffer);
         } else {
             if (frameCount % 60 == 0) {
                 [plugin_ sendLogToFlutter:@"Native: ❌ Failed to create sample buffer"];
+                [plugin_ sendErrorToFlutter:@"PiPError" message:@"Failed to create sample buffer" details:nil];
             }
         }
         CVPixelBufferRelease(pixelBuffer);
@@ -242,6 +177,7 @@ public:
         OSStatus status = CMVideoFormatDescriptionCreateForImageBuffer(kCFAllocatorDefault, pixelBuffer, &formatDesc);
         if (status != noErr) {
             [plugin_ sendLogToFlutter:@"Native: ❌ Failed to create format description"];
+            [plugin_ sendErrorToFlutter:@"PiPError" message:@"Failed to create format description" details:@{@"status": @(status)}];
             return NULL;
         }
         CMTime timestamp = CMTimeMakeWithSeconds(CACurrentMediaTime(), 1000000);
@@ -255,6 +191,7 @@ public:
         CFRelease(formatDesc);
         if (status != noErr) {
             [plugin_ sendLogToFlutter:@"Native: ❌ Failed to create sample buffer"];
+            [plugin_ sendErrorToFlutter:@"PiPError" message:@"Failed to create sample buffer" details:@{@"status": @(status)}];
             return NULL;
         }
         return sampleBuffer;
@@ -312,40 +249,18 @@ private:
 
 - (void)handleMethodCall:(FlutterMethodCall*)call result:(FlutterResult)result {
     if ([call.method isEqualToString:@"CreateRT"]) {
-        [self sendLogToFlutter:@"🔧 FVP: CreateRT called"];
-        @try {
-            const auto handle = ((NSNumber*)call.arguments[@"player"]).longLongValue;
-            const auto width = ((NSNumber*)call.arguments[@"width"]).intValue;
-            const auto height = ((NSNumber*)call.arguments[@"height"]).intValue;
-            
-            [self sendErrorToServer:@"FVP_CREATE_RT" message:@"CreateRT called" additionalData:@{
-                @"playerHandle": @(handle),
-                @"width": @(width),
-                @"height": @(height),
-                @"method": @"CreateRT"
-            }];
-            
-            auto player = make_shared<TexturePlayer>(handle, width, height, _texRegistry, self);
-            players[player->textureId()] = player;
-            
-            [self sendLogToFlutter:[NSString stringWithFormat:@"✅ FVP: CreateRT successful - textureId: %lld", player->textureId()]];
-            [self sendErrorToServer:@"FVP_SUCCESS" message:@"CreateRT successful" additionalData:@{
-                @"textureId": @(player->textureId()),
-                @"playerHandle": @(handle),
-                @"width": @(width),
-                @"height": @(height)
-            }];
-            
-            result(@(player->textureId()));
-        } @catch (NSException *exception) {
-            [self sendLogToFlutter:[NSString stringWithFormat:@"❌ FVP: CreateRT exception: %@", exception.reason]];
-            [self sendErrorToServer:@"FVP_CRASH" message:[NSString stringWithFormat:@"CreateRT crashed: %@", exception.reason] additionalData:@{
-                @"exceptionName": exception.name,
-                @"exceptionReason": exception.reason,
-                @"method": @"CreateRT"
-            }];
-            result([FlutterError errorWithCode:@"CREATE_RT_FAILED" message:exception.reason details:nil]);
+        const auto handle = ((NSNumber*)call.arguments[@"player"]).longLongValue;
+        const auto width = ((NSNumber*)call.arguments[@"width"]).intValue;
+        const auto height = ((NSNumber*)call.arguments[@"height"]).intValue;
+        if (width <= 0 || height <= 0) {
+            [self sendLogToFlutter:@"❌ CreateRT: Invalid dimensions"];
+            [self sendErrorToFlutter:@"CreateRTError" message:@"Invalid width or height" details:@{@"width": @(width), @"height": @(height)}];
+            result([FlutterError errorWithCode:@"INVALID_DIMENSIONS" message:@"Width and height must be positive" details:nil]);
+            return;
         }
+        auto player = make_shared<TexturePlayer>(handle, width, height, _texRegistry, self);
+        players[player->textureId()] = player;
+        result(@(player->textureId()));
     } else if ([call.method isEqualToString:@"ReleaseRT"]) {
         const auto texId = ((NSNumber*)call.arguments[@"texture"]).longLongValue;
         [_texRegistry unregisterTexture:texId];
@@ -365,15 +280,9 @@ private:
         result(nil);
     } else if ([call.method isEqualToString:@"enablePipForTexture"]) {
         [self sendLogToFlutter:@"🔧 PiP: enablePipForTexture called"];
-        [self sendErrorToServer:@"FVP_ENABLE_PIP" message:@"enablePipForTexture called" additionalData:@{
-            @"method": @"enablePipForTexture"
-        }];
-        
         if (![AVPictureInPictureController isPictureInPictureSupported]) {
             [self sendLogToFlutter:@"❌ PiP: Picture-in-Picture not supported"];
-            [self sendErrorToServer:@"FVP_PIP_NOT_SUPPORTED" message:@"PiP not supported on this device" additionalData:@{
-                @"method": @"enablePipForTexture"
-            }];
+            [self sendErrorToFlutter:@"PiPError" message:@"Picture-in-Picture not supported" details:nil];
             result([FlutterError errorWithCode:@"NOT_SUPPORTED" message:@"PiP not supported" details:nil]);
             return;
         }
@@ -382,6 +291,7 @@ private:
         auto it = players.find(textureId);
         if (it == players.end()) {
             [self sendLogToFlutter:@"❌ PiP: Texture not found"];
+            [self sendErrorToFlutter:@"PiPError" message:@"Texture not found" details:@{@"textureId": @(textureId)}];
             result([FlutterError errorWithCode:@"NO_TEXTURE" message:@"Texture not found" details:nil]);
             return;
         }
@@ -406,6 +316,7 @@ private:
         AVSampleBufferDisplayLayer *displayLayer = [_pipLayers objectForKey:@(textureId)];
         if (!displayLayer) {
             [self sendLogToFlutter:@"❌ PiP: No display layer"];
+            [self sendErrorToFlutter:@"PiPError" message:@"No display layer" details:@{@"textureId": @(textureId)}];
             result([FlutterError errorWithCode:@"NO_LAYER" message:@"PiP not enabled" details:nil]);
             return;
         }
@@ -415,13 +326,15 @@ private:
             contentSource = [[AVPictureInPictureControllerContentSource alloc] initWithSampleBufferDisplayLayer:displayLayer playbackDelegate:playbackDelegate];
         } else {
             [self sendLogToFlutter:@"❌ PiP: iOS 15+ required for SampleBufferDisplayLayer"];
+            [self sendErrorToFlutter:@"PiPError" message:@"iOS 15+ required for SampleBufferDisplayLayer" details:nil];
             result([FlutterError errorWithCode:@"UNSUPPORTED_OS" message:@"iOS 15+ required" details:nil]);
             return;
         }
         AVPictureInPictureController *pipController = [[AVPictureInPictureController alloc] initWithContentSource:contentSource];
         if (!pipController) {
             [self sendLogToFlutter:@"❌ PiP: Failed to create AVPictureInPictureController"];
-            result(@NO);
+            [self sendErrorToFlutter:@"PiPError" message:@"Failed to create AVPictureInPictureController" details:nil];
+            result([FlutterError errorWithCode:@"NO_CONTROLLER" message:@"Failed to create PiP controller" details:nil]);
             return;
         }
         pipController.delegate = self;
@@ -436,6 +349,7 @@ private:
             result(@YES);
         } else {
             [self sendLogToFlutter:@"❌ PiP: Not possible"];
+            [self sendErrorToFlutter:@"PiPError" message:@"PiP not possible" details:nil];
             result(@NO);
         }
     } else if ([call.method isEqualToString:@"exitPipMode"]) {
@@ -450,6 +364,7 @@ private:
             [self sendLogToFlutter:[NSString stringWithFormat:@"✅ PiP: stopPictureInPicture called for texture %lld", textureId]];
         } else {
             [self sendLogToFlutter:@"⚠️ PiP: No controller found for texture"];
+            [self sendErrorToFlutter:@"PiPError" message:@"No controller found for texture" details:@{@"textureId": @(textureId)}];
         }
         result(@YES);
     } else {
@@ -477,6 +392,7 @@ private:
 
 - (void)pictureInPictureController:(AVPictureInPictureController *)controller failedToStartPictureInPictureWithError:(NSError *)error {
     [self sendLogToFlutter:[NSString stringWithFormat:@"❌ PiP: Failed to start: %@", error.localizedDescription]];
+    [self sendErrorToFlutter:@"PiPError" message:[NSString stringWithFormat:@"Failed to start PiP: %@", error.localizedDescription] details:@{@"code": @(error.code)}];
     if (error.code == -1001) {
         [self sendLogToFlutter:@"Native: Error - PiP already active"];
     } else if (error.code == -1002) {
@@ -489,6 +405,7 @@ private:
     NSError *error;
     if (![[AVAudioSession sharedInstance] setActive:YES withOptions:0 error:&error]) {
         [self sendLogToFlutter:[NSString stringWithFormat:@"Native: Failed to reactivate audio: %@", error.localizedDescription]];
+        [self sendErrorToFlutter:@"PiPError" message:[NSString stringWithFormat:@"Failed to reactivate audio: %@", error.localizedDescription] details:@{@"code": @(error.code)}];
     }
     completionHandler(YES);
 }
@@ -506,62 +423,13 @@ private:
     [self.channel invokeMethod:@"nativeLog" arguments:message];
 }
 
-- (void)sendErrorToServer:(NSString*)errorType message:(NSString*)message additionalData:(NSDictionary*)additionalData {
-    // Create error data dictionary
-    NSMutableDictionary *errorData = [NSMutableDictionary dictionary];
-    
-    // Create ISO8601 timestamp
-    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
-    [formatter setDateFormat:@"yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"];
-    [formatter setTimeZone:[NSTimeZone timeZoneWithAbbreviation:@"UTC"]];
-    NSString *timestamp = [formatter stringFromDate:[NSDate date]];
-    [errorData setObject:timestamp forKey:@"timestamp"];
-    [errorData setObject:errorType forKey:@"errorType"];
-    [errorData setObject:message forKey:@"message"];
-    [errorData setObject:@"ios" forKey:@"platform"];
-    [errorData setObject:@"1.0.0" forKey:@"appVersion"];
-    
-    // Device info
-    NSMutableDictionary *deviceInfo = [NSMutableDictionary dictionary];
-    [deviceInfo setObject:@YES forKey:@"isPhysicalDevice"];
-    [deviceInfo setObject:@NO forKey:@"isDebugMode"];
-    [deviceInfo setObject:@YES forKey:@"isIOS"];
-    [deviceInfo setObject:@YES forKey:@"isTouchDevice"];
-    [deviceInfo setObject:@NO forKey:@"isAndroidTVDevice"];
-    [errorData setObject:deviceInfo forKey:@"deviceInfo"];
-    
-    // Additional data
-    if (additionalData) {
-        [errorData setObject:additionalData forKey:@"additionalData"];
-    }
-    
-    // Send to server
-    NSURL *url = [NSURL URLWithString:@"http://192.168.86.79/log_error"];
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-    [request setHTTPMethod:@"POST"];
-    [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-    
-    NSError *jsonError;
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:errorData options:0 error:&jsonError];
-    if (jsonData) {
-        [request setHTTPBody:jsonData];
-        
-        NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-            if (error) {
-                NSLog(@"❌ Failed to send error to server: %@", error.localizedDescription);
-            } else {
-                NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
-                if (httpResponse.statusCode == 200) {
-                    NSLog(@"✅ Error sent to server successfully");
-                } else {
-                    NSLog(@"❌ Server returned status: %ld", (long)httpResponse.statusCode);
-                }
-            }
-        }];
-        [task resume];
-    } else {
-        NSLog(@"❌ Failed to serialize error data: %@", jsonError.localizedDescription);
-    }
+- (void)sendErrorToFlutter:(NSString*)errorType message:(NSString*)message details:(NSDictionary*)details {
+    NSDictionary *errorData = @{
+        @"errorType": errorType,
+        @"message": message,
+        @"details": details ?: @{}
+    };
+    [self.channel invokeMethod:@"nativeError" arguments:errorData];
 }
 
 - (void)cleanupPipForTextureId:(int64_t)textureId {
