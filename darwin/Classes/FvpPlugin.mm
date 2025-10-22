@@ -248,7 +248,18 @@ private:
 }
 
 - (void)handleMethodCall:(FlutterMethodCall*)call result:(FlutterResult)result {
-    if ([call.method isEqualToString:@"CreateRT"]) {
+    if ([call.method isEqualToString:@"test"]) {
+        [self sendLogToFlutter:@"✅ Test channel call succeeded"];
+        result(@YES);
+    } else if ([call.method isEqualToString:@"isPipSupported"]) {
+        BOOL supported = [AVPictureInPictureController isPictureInPictureSupported];
+        [self sendLogToFlutter:[NSString stringWithFormat:@"✅ PiP: Picture-in-Picture supported: %d", supported]];
+        if (!supported) {
+            [self sendErrorToFlutter:@"PiPError" message:@"Picture-in-Picture not supported" details:nil];
+        }
+        result(@(supported));
+        return;
+    } else if ([call.method isEqualToString:@"CreateRT"]) {
         const auto handle = ((NSNumber*)call.arguments[@"player"]).longLongValue;
         const auto width = ((NSNumber*)call.arguments[@"width"]).intValue;
         const auto height = ((NSNumber*)call.arguments[@"height"]).intValue;
@@ -258,9 +269,21 @@ private:
             result([FlutterError errorWithCode:@"INVALID_DIMENSIONS" message:@"Width and height must be positive" details:nil]);
             return;
         }
-        auto player = make_shared<TexturePlayer>(handle, width, height, _texRegistry, self);
-        players[player->textureId()] = player;
-        result(@(player->textureId()));
+        @try {
+            auto player = make_shared<TexturePlayer>(handle, width, height, _texRegistry, self);
+            if (!player) {
+                [self sendLogToFlutter:@"❌ CreateRT: Failed to create TexturePlayer"];
+                [self sendErrorToFlutter:@"CreateRTError" message:@"Failed to create TexturePlayer" details:nil];
+                result([FlutterError errorWithCode:@"PLAYER_CREATION_FAILED" message:@"Failed to create player" details:nil]);
+                return;
+            }
+            players[player->textureId()] = player;
+            result(@(player->textureId()));
+        } @catch (NSException *exception) {
+            [self sendLogToFlutter:[NSString stringWithFormat:@"❌ CreateRT: Exception: %@", exception.reason]];
+            [self sendErrorToFlutter:@"CreateRTError" message:[NSString stringWithFormat:@"Exception in CreateRT: %@", exception.reason] details:@{@"name": exception.name}];
+            result([FlutterError errorWithCode:@"CREATE_RT_EXCEPTION" message:exception.reason details:nil]);
+        }
     } else if ([call.method isEqualToString:@"ReleaseRT"]) {
         const auto texId = ((NSNumber*)call.arguments[@"texture"]).longLongValue;
         [_texRegistry unregisterTexture:texId];
