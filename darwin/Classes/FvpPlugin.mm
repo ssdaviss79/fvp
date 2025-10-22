@@ -19,6 +19,32 @@
 using namespace mdk;
 using namespace std;
 
+// Playback delegate for AVPictureInPictureController
+@interface FvpPipPlaybackDelegate : NSObject <AVPictureInPictureSampleBufferPlaybackDelegate>
+@property (nonatomic, weak) FvpPlugin* plugin;
+@end
+
+@implementation FvpPipPlaybackDelegate
+- (instancetype)initWithPlugin:(FvpPlugin*)plugin {
+    self = [super init];
+    self.plugin = plugin;
+    return self;
+}
+
+- (BOOL)pictureInPictureControllerIsPlaybackPaused:(AVPictureInPictureController *)controller {
+    return NO; // Always playing; mdk controls actual playback
+}
+
+- (CMTimeRange)pictureInPictureControllerTimeRangeForPlayback:(AVPictureInPictureController *)controller {
+    return CMTimeRangeMake(kCMTimeZero, kCMTimePositiveInfinity); // Continuous playback
+}
+
+- (void)pictureInPictureController:(AVPictureInPictureController *)controller setPlaying:(BOOL)playing {
+    [self.plugin sendLogToFlutter:[NSString stringWithFormat:@"🔄 PiP: Set playing: %d", playing]];
+    // Optionally pause/resume mdk::Player via plugin
+}
+@end
+
 @interface MetalTexture : NSObject<FlutterTexture>
 @end
 
