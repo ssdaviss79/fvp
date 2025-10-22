@@ -202,6 +202,7 @@ private:
 #endif
     FlutterMethodChannel* channel = [FlutterMethodChannel methodChannelWithName:@"fvp" binaryMessenger:messenger];
     FvpPlugin* instance = [[FvpPlugin alloc] initWithRegistrar:registrar];
+    instance.channel = channel;
 #if TARGET_OS_OSX
 #else
   [registrar addApplicationDelegate:instance];
@@ -222,7 +223,6 @@ private:
     _pipControllers = [NSMutableDictionary dictionary];
     _pipLayers = [NSMutableDictionary dictionary];
     _pipDummyViews = [NSMutableDictionary dictionary];
-    _channel = [FlutterMethodChannel methodChannelWithName:@"fvp" binaryMessenger:[registrar messenger]]; // Initialize
     return self;
 }
 
@@ -252,7 +252,7 @@ private:
         }
 #endif
         result(nil);
-    else if ([call.method isEqualToString:@"enablePipForTexture"]) {
+    } else if ([call.method isEqualToString:@"enablePipForTexture"]) {
         [self sendLogToFlutter:@"🔧 PiP: enablePipForTexture called"];
         if (![AVPictureInPictureController isPictureInPictureSupported]) {
             [self sendLogToFlutter:@"❌ PiP: Picture-in-Picture not supported"];
@@ -283,9 +283,9 @@ private:
         [self sendLogToFlutter:@"✅ PiP: Created display layer for texture"];
         result(@YES);
     } else if ([call.method isEqualToString:@"enterPipMode"]) {
-        [self sendLogToFlutter:[NSString stringWithFormat:@"🔧 PiP: enterPipMode called - textureId: %lld, size: %@x%@", textureId, call.arguments[@"width"], call.arguments[@"height"]]];
         NSNumber *textureIdNum = call.arguments[@"textureId"];
         int64_t textureId = [textureIdNum longLongValue];
+        [self sendLogToFlutter:[NSString stringWithFormat:@"🔧 PiP: enterPipMode called - textureId: %lld, size: %@x%@", textureId, call.arguments[@"width"], call.arguments[@"height"]]];
         AVSampleBufferDisplayLayer *displayLayer = [_pipLayers objectForKey:@(textureId)];
         if (!displayLayer) {
             [self sendLogToFlutter:@"❌ PiP: No display layer"];
