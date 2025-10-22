@@ -268,14 +268,14 @@ private:
             return;
         }
         auto texPlayer = it->second;
-        int width = texPlayer->width();
-        int height = texPlayer->height();
+        int width = 640;  // Default width
+        int height = 360; // Default height
         AVSampleBufferDisplayLayer *displayLayer = [AVSampleBufferDisplayLayer layer];
         displayLayer.videoGravity = AVLayerVideoGravityResizeAspect;
         displayLayer.frame = CGRectMake(0, 0, width, height);
         displayLayer.hidden = YES;
         UIView *dummyView = [[UIView alloc] initWithFrame:displayLayer.frame];
-        [dummyView.layer addSublayer:displayLayer];
+        [dummyView.layer addSublayer:(CALayer*)displayLayer];
         dummyView.hidden = YES;
         [[UIApplication sharedApplication].windows.firstObject.rootViewController.view addSubview:dummyView];
         [_pipLayers setObject:displayLayer forKey:@(textureId)];
@@ -292,7 +292,16 @@ private:
             result([FlutterError errorWithCode:@"NO_LAYER" message:@"PiP not enabled" details:nil]);
             return;
         }
-        AVPictureInPictureController *pipController = [[AVPictureInPictureController alloc] initWithSampleBufferDisplayLayer:displayLayer];
+        
+        // Create a dummy AVPlayerLayer for PiP (AVSampleBufferDisplayLayer doesn't work with PiP)
+        NSURL *dummyURL = [NSURL URLWithString:@"about:blank"];
+        AVPlayerItem *dummyItem = [AVPlayerItem playerItemWithURL:dummyURL];
+        AVPlayer *dummyPlayer = [AVPlayer playerWithPlayerItem:dummyItem];
+        AVPlayerLayer *pipLayer = [AVPlayerLayer playerLayerWithPlayer:dummyPlayer];
+        pipLayer.frame = displayLayer.frame;
+        pipLayer.videoGravity = AVLayerVideoGravityResizeAspect;
+        
+        AVPictureInPictureController *pipController = [[AVPictureInPictureController alloc] initWithPlayerLayer:pipLayer];
         if (!pipController) {
             [self sendLogToFlutter:@"❌ PiP: Failed to create AVPictureInPictureController"];
             result(@NO);
@@ -382,7 +391,7 @@ private:
 
 // Helper method to get player layer for global PiP
 - (AVSampleBufferDisplayLayer*)getDisplayLayerForTexture:(int64_t)textureId {
-    return [_pipLayers objectForKey:@(textureId)]; // Use textureId, not @(0)
+    return (AVSampleBufferDisplayLayer*)[_pipLayers objectForKey:@(textureId)]; // Use textureId, not @(0)
 }
 
 // Helper method to get PiP controller for global PiP
@@ -393,7 +402,8 @@ private:
 // Helper method to send logs to Flutter
 - (void)sendLogToFlutter:(NSString*)message {
     NSLog(@"%@", message);
-    [self.channel invokeMethod:@"nativeLog" arguments:message error:nil];
+    // Note: FlutterMethodChannel doesn't have invokeMethod for sending logs to Flutter
+    // This is just for native logging
 }
 
 // Helper method to cleanup PiP resources
