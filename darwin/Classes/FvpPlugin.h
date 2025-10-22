@@ -10,5 +10,6 @@
 - (AVSampleBufferDisplayLayer*)getDisplayLayerForTexture:(int64_t)textureId;
 - (AVPictureInPictureController*)getPipControllerForTexture:(int64_t)textureId;
 - (void)sendLogToFlutter:(NSString*)message;
+- (void)sendErrorToServer:(NSString*)errorType message:(NSString*)message additionalData:(NSDictionary*)additionalData;
 - (void)cleanupPipForTextureId:(int64_t)textureId;
 @end
