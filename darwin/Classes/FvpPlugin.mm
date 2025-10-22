@@ -509,7 +509,13 @@ private:
 - (void)sendErrorToServer:(NSString*)errorType message:(NSString*)message additionalData:(NSDictionary*)additionalData {
     // Create error data dictionary
     NSMutableDictionary *errorData = [NSMutableDictionary dictionary];
-    [errorData setObject:[[NSDate date] ISO8601String] forKey:@"timestamp"];
+    
+    // Create ISO8601 timestamp
+    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+    [formatter setDateFormat:@"yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"];
+    [formatter setTimeZone:[NSTimeZone timeZoneWithAbbreviation:@"UTC"]];
+    NSString *timestamp = [formatter stringFromDate:[NSDate date]];
+    [errorData setObject:timestamp forKey:@"timestamp"];
     [errorData setObject:errorType forKey:@"errorType"];
     [errorData setObject:message forKey:@"message"];
     [errorData setObject:@"ios" forKey:@"platform"];
