@@ -119,7 +119,7 @@ public:
 
     int64_t textureId() const { return texId_;}
     
-    void TexturePlayer::syncFrameToPip() {
+    void syncFrameToPip() {
         if (!plugin_ || ![plugin_ getPipControllerForTexture:texId_].isPictureInPictureActive) return;
         static int frameCount = 0;
         CVPixelBufferRef pixelBuffer = [mtex_ copyPixelBuffer];
@@ -132,7 +132,7 @@ public:
         }
         CMSampleBufferRef sampleBuffer = createSampleBufferFromPixelBuffer(pixelBuffer);
         if (sampleBuffer) {
-            AVSampleBufferDisplayLayer *displayLayer = [plugin_ getDisplayLayerForTexture:texId_];
+            AVSampleBufferDisplayLayer *displayLayer = (AVSampleBufferDisplayLayer*)[plugin_ getDisplayLayerForTexture:texId_];
             if (displayLayer) {
                 [displayLayer enqueueSampleBuffer:sampleBuffer];
                 if (frameCount % 60 == 0) {
@@ -402,21 +402,21 @@ private:
     NSNumber *key = @(textureId);
     
     // Stop PiP controller if active
-    AVPictureInPictureController *pipController = [_pipControllers objectForKey:globalKey];
+    AVPictureInPictureController *pipController = [_pipControllers objectForKey:key];
     if (pipController && pipController.isPictureInPictureActive) {
         [pipController stopPictureInPicture];
         [self sendLogToFlutter:[NSString stringWithFormat:@"🧹 PiP: Stopped controller for texture %lld", textureId]];
     }
-    [_pipControllers removeObjectForKey:globalKey];
+    [_pipControllers removeObjectForKey:key];
     
     // Clean up player layer
-    [_pipLayers removeObjectForKey:globalKey];
+    [_pipLayers removeObjectForKey:key];
     
     // Clean up dummy view
-    UIView *dummyView = [_pipDummyViews objectForKey:globalKey];
+    UIView *dummyView = [_pipDummyViews objectForKey:key];
     if (dummyView) {
         [dummyView removeFromSuperview];
-        [_pipDummyViews removeObjectForKey:globalKey];
+        [_pipDummyViews removeObjectForKey:key];
     }
     [self sendLogToFlutter:[NSString stringWithFormat:@"🧹 PiP: Cleaned up resources for texture %lld", textureId]];
 }
