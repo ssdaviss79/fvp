@@ -280,7 +280,7 @@ private:
         }
         AVPictureInPictureControllerContentSource *contentSource;
         if (@available(iOS 15.0, *)) {
-            contentSource = [[AVPictureInPictureControllerContentSource alloc] initWithSampleBufferDisplayLayer:displayLayer];
+            contentSource = [[AVPictureInPictureControllerContentSource alloc] initWithSampleBufferDisplayLayer:displayLayer player:nil];
         } else {
             [self sendLogToFlutter:@"❌ PiP: iOS 15+ required for SampleBufferDisplayLayer"];
             result([FlutterError errorWithCode:@"UNSUPPORTED_OS" message:@"iOS 15+ required" details:nil]);
@@ -371,7 +371,7 @@ private:
 
 - (void)sendLogToFlutter:(NSString*)message {
     NSLog(@"%@", message);
-    [self.channel invokeMethod:@"nativeLog" arguments:message error:nil];
+    [self.channel invokeMethod:@"nativeLog" arguments:message];
 }
 
 - (void)cleanupPipForTextureId:(int64_t)textureId {
