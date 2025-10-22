@@ -186,9 +186,9 @@ private:
 }
 @property(readonly, strong, nonatomic) NSObject<FlutterTextureRegistry>* texRegistry;
 @property(strong, nonatomic) NSMutableDictionary<NSNumber*, AVPictureInPictureController*>* pipControllers;
-@property(strong, nonatomic) NSMutableDictionary<NSNumber*, AVPlayerLayer*>* pipLayers;
+@property(strong, nonatomic) NSMutableDictionary<NSNumber*, AVSampleBufferDisplayLayer*>* pipLayers; // Changed
 @property(strong, nonatomic) NSMutableDictionary<NSNumber*, UIView*>* pipDummyViews;
-@property(strong, nonatomic) FlutterMethodChannel* channel; // Add this
+@property(strong, nonatomic) FlutterMethodChannel* channel;
 @end
 
 @implementation FvpPlugin
@@ -268,36 +268,31 @@ private:
             return;
         }
         auto texPlayer = it->second;
-        int width = 640;  // Default width
-        int height = 360; // Default height
-        // Create a dummy AVPlayerLayer for PiP
-        NSURL *dummyURL = [NSURL URLWithString:@"about:blank"];
-        AVPlayerItem *dummyItem = [AVPlayerItem playerItemWithURL:dummyURL];
-        AVPlayer *dummyPlayer = [AVPlayer playerWithPlayerItem:dummyItem];
-        AVPlayerLayer *playerLayer = [AVPlayerLayer playerLayerWithPlayer:dummyPlayer];
-        playerLayer.videoGravity = AVLayerVideoGravityResizeAspect;
-        playerLayer.frame = CGRectMake(0, 0, width, height);
-        playerLayer.hidden = YES;
-        UIView *dummyView = [[UIView alloc] initWithFrame:playerLayer.frame];
-        [dummyView.layer addSublayer:playerLayer];
+        int width = texPlayer->width();
+        int height = texPlayer->height();
+        AVSampleBufferDisplayLayer *displayLayer = [AVSampleBufferDisplayLayer layer];
+        displayLayer.videoGravity = AVLayerVideoGravityResizeAspect;
+        displayLayer.frame = CGRectMake(0, 0, width, height);
+        displayLayer.hidden = YES;
+        UIView *dummyView = [[UIView alloc] initWithFrame:displayLayer.frame];
+        [dummyView.layer addSublayer:displayLayer];
         dummyView.hidden = YES;
         [[UIApplication sharedApplication].windows.firstObject.rootViewController.view addSubview:dummyView];
-        [_pipLayers setObject:playerLayer forKey:@(textureId)];
+        [_pipLayers setObject:displayLayer forKey:@(textureId)];
         [_pipDummyViews setObject:dummyView forKey:@(textureId)];
-        [self sendLogToFlutter:@"✅ PiP: Created player layer for texture"];
+        [self sendLogToFlutter:@"✅ PiP: Created display layer for texture"];
         result(@YES);
     } else if ([call.method isEqualToString:@"enterPipMode"]) {
+        [self sendLogToFlutter:[NSString stringWithFormat:@"🔧 PiP: enterPipMode called - textureId: %lld, size: %@x%@", textureId, call.arguments[@"width"], call.arguments[@"height"]]];
         NSNumber *textureIdNum = call.arguments[@"textureId"];
         int64_t textureId = [textureIdNum longLongValue];
-        [self sendLogToFlutter:[NSString stringWithFormat:@"🔧 PiP: enterPipMode called - textureId: %lld, size: %@x%@", textureId, call.arguments[@"width"], call.arguments[@"height"]]];
-        AVPlayerLayer *playerLayer = [_pipLayers objectForKey:@(textureId)];
-        if (!playerLayer) {
-            [self sendLogToFlutter:@"❌ PiP: No player layer"];
+        AVSampleBufferDisplayLayer *displayLayer = [_pipLayers objectForKey:@(textureId)];
+        if (!displayLayer) {
+            [self sendLogToFlutter:@"❌ PiP: No display layer"];
             result([FlutterError errorWithCode:@"NO_LAYER" message:@"PiP not enabled" details:nil]);
             return;
         }
-        
-        AVPictureInPictureController *pipController = [[AVPictureInPictureController alloc] initWithPlayerLayer:playerLayer];
+        AVPictureInPictureController *pipController = [[AVPictureInPictureController alloc] initWithSampleBufferDisplayLayer:displayLayer];
         if (!pipController) {
             [self sendLogToFlutter:@"❌ PiP: Failed to create AVPictureInPictureController"];
             result(@NO);
@@ -318,8 +313,6 @@ private:
             result(@NO);
         }
     } else if ([call.method isEqualToString:@"exitPipMode"]) {
-        NSLog(@"🔧 PiP: exitPipMode called");
-        
         [self sendLogToFlutter:@"🔧 PiP: exitPipMode called"];
         NSNumber *textureIdNum = call.arguments[@"textureId"];
         int64_t textureId = [textureIdNum longLongValue];
@@ -386,8 +379,8 @@ private:
 }
 
 // Helper method to get player layer for global PiP
-- (AVPlayerLayer*)getDisplayLayerForTexture:(int64_t)textureId {
-    return [_pipLayers objectForKey:@(textureId)]; // Use textureId, not @(0)
+- (AVSampleBufferDisplayLayer*)getDisplayLayerForTexture:(int64_t)textureId {
+    return [_pipLayers objectForKey:@(textureId)];
 }
 
 // Helper method to get PiP controller for global PiP
