@@ -6,8 +6,9 @@
 #import <AVFoundation/AVFoundation.h>
 #import <AVKit/AVKit.h>
 
-@interface FvpPlugin : NSObject<FlutterPlugin>
+@interface FvpPlugin : NSObject<FlutterPlugin, AVPictureInPictureControllerDelegate>
 - (AVPlayerLayer*)getDisplayLayerForTexture:(int64_t)textureId;
 - (AVPictureInPictureController*)getPipControllerForTexture:(int64_t)textureId;
 - (void)sendLogToFlutter:(NSString*)message;
+- (void)cleanupPipForTextureId:(int64_t)textureId;
 @end
