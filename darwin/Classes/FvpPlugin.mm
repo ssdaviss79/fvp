@@ -124,7 +124,7 @@ using namespace std;
 }
 
 - (void)dealloc {
-    [plugin sendLogToFlutter:[NSString stringWithFormat@"❌ MetalTexture deallocated before registration!"]];
+    [self sendLogToFlutter:[NSString stringWithFormat@"❌ MetalTexture deallocated before registration!"]];
     CVPixelBufferRelease(pixbuf);
     if (texCache) CFRelease(texCache);
 }
