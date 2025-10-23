@@ -124,7 +124,6 @@ using namespace std;
 }
 
 - (void)dealloc {
-    [plugin sendLogToFlutter:[NSString stringWithFormat:@"❌ MetalTexture deallocated before registration!"]];
     CVPixelBufferRelease(pixbuf);
     if (texCache) CFRelease(texCache);
 }
@@ -258,7 +257,7 @@ public:
             } else {
                 [plugin sendLogToFlutter:@"✅ FVP: On main thread, registering texture"];
                 [plugin sendLogToFlutter:[NSString stringWithFormat:@"🔧 FVP: About to register texture - object still valid: %p", mtex_]];
-                texId_ = [texReg registerTexture:mtex_];
+            texId_ = [texReg registerTexture:mtex_];
             }
             
             [plugin sendLogToFlutter:[NSString stringWithFormat:@"🔧 FVP: Texture registration returned ID: %lld", texId_]];
