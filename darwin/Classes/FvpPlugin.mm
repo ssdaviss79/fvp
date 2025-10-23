@@ -61,33 +61,28 @@ using namespace std;
     self = [super init];
     
     @try {
-        NSLog(@"🔧 FVP: MetalTexture initWithWidth:%d height:%d", width, height);
+        // Note: We can't use sendLogToFlutter here because we don't have access to the plugin instance
+        // These logs will go to the system console, but the important ones are in TexturePlayer constructor
         
         // Check Metal device creation
         device = MTLCreateSystemDefaultDevice();
         if (!device) {
-            NSLog(@"❌ FVP: Failed to create Metal device");
             return nil;
         }
-        NSLog(@"✅ FVP: Metal device created successfully");
         
         // Check command queue creation
         cmdQueue = [device newCommandQueue];
         if (!cmdQueue) {
-            NSLog(@"❌ FVP: Failed to create command queue");
             return nil;
         }
-        NSLog(@"✅ FVP: Command queue created successfully");
         
         // Create render texture
         auto td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:width height:height mipmapped:NO];
         td.usage = MTLTextureUsageRenderTarget;
         texture = [device newTextureWithDescriptor:td];
         if (!texture) {
-            NSLog(@"❌ FVP: Failed to create Metal texture");
             return nil;
         }
-        NSLog(@"✅ FVP: Metal texture created successfully");
         
         // Create pixel buffer with proper attributes
         auto attr = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
@@ -99,40 +94,31 @@ using namespace std;
         CFRelease(attr);
         
         if (result != kCVReturnSuccess || !pixbuf) {
-            NSLog(@"❌ FVP: Failed to create pixel buffer, CVReturn: %d", result);
             return nil;
         }
-        NSLog(@"✅ FVP: Pixel buffer created successfully");
         
         // Use iOS-compatible CVMetalTextureCache approach (always use this on iOS)
         CVMetalTextureCacheCreate(nullptr, nullptr, device, nullptr, &texCache);
         if (!texCache) {
-            NSLog(@"❌ FVP: Failed to create Metal texture cache");
             return nil;
         }
-        NSLog(@"✅ FVP: Metal texture cache created successfully");
         
         CVMetalTextureRef cvtex = nullptr;
         CVReturn texResult = CVMetalTextureCacheCreateTextureFromImage(nil, texCache, pixbuf, nil, MTLPixelFormatBGRA8Unorm, width, height, 0, &cvtex);
         if (texResult != kCVReturnSuccess || !cvtex) {
-            NSLog(@"❌ FVP: Failed to create texture from image, CVReturn: %d", texResult);
             return nil;
         }
         
         fltex = CVMetalTextureGetTexture(cvtex);
         if (!fltex) {
-            NSLog(@"❌ FVP: Failed to get texture from CVMetalTexture");
             CFRelease(cvtex);
             return nil;
         }
-        NSLog(@"✅ FVP: Flutter texture created successfully");
         
         CFRelease(cvtex);
-        NSLog(@"✅ FVP: MetalTexture created successfully");
         return self;
         
     } @catch (NSException *exception) {
-        NSLog(@"❌ FVP: MetalTexture exception: %@", exception.reason);
         return nil;
     }
 }
@@ -147,32 +133,26 @@ using namespace std;
     
     // Comprehensive validation
     if (!texture) {
-        NSLog(@"❌ MetalTexture: No render texture");
         return nil;
     }
     if (!fltex) {
-        NSLog(@"❌ MetalTexture: No Flutter texture");
         return nil;
     }
     if (!pixbuf) {
-        NSLog(@"❌ MetalTexture: No pixel buffer");
         return nil;
     }
     if (!cmdQueue) {
-        NSLog(@"❌ MetalTexture: No command queue");
         return nil;
     }
     
     @try {
         auto cmdbuf = [cmdQueue commandBuffer];
         if (!cmdbuf) {
-            NSLog(@"❌ MetalTexture: Failed to create command buffer");
             return nil;
         }
         
         auto blit = [cmdbuf blitCommandEncoder];
         if (!blit) {
-            NSLog(@"❌ MetalTexture: Failed to create blit command encoder");
             return nil;
         }
         
@@ -193,7 +173,6 @@ using namespace std;
         return CVPixelBufferRetain(pixbuf);
         
     } @catch (NSException *exception) {
-        NSLog(@"❌ MetalTexture: Exception in copyPixelBuffer: %@", exception.reason);
         return nil;
     }
 }
@@ -204,54 +183,73 @@ public:
     TexturePlayer(int64_t handle, int width, int height, NSObject<FlutterTextureRegistry>* texReg, FvpPlugin* plugin)
         : Player(reinterpret_cast<mdkPlayerAPI*>(handle)) {
         try {
-            NSLog(@"🔧 FVP: TexturePlayer constructor - handle: %lld, size: %dx%d", handle, width, height);
+            [plugin sendLogToFlutter:[NSString stringWithFormat:@"🔧 FVP: TexturePlayer constructor - handle: %lld, size: %dx%d", handle, width, height]];
             
             // Create MetalTexture with error checking
-            NSLog(@"🔧 FVP: Creating MetalTexture with size %dx%d", width, height);
+            [plugin sendLogToFlutter:[NSString stringWithFormat:@"🔧 FVP: Creating MetalTexture with size %dx%d", width, height]];
             mtex_ = [[MetalTexture alloc] initWithWidth:width height:height];
             if (!mtex_) {
-                NSLog(@"❌ FVP: Failed to create MetalTexture - alloc returned nil");
+                [plugin sendErrorToFlutter:@"FVP_METAL_TEXTURE_FAILED" message:@"Failed to create MetalTexture - alloc returned nil" additionalData:@{
+                    @"handle": @(handle),
+                    @"width": @(width),
+                    @"height": @(height)
+                }];
                 throw std::runtime_error("Failed to create MetalTexture");
             }
-            NSLog(@"✅ FVP: MetalTexture created successfully");
+            [plugin sendLogToFlutter:@"✅ FVP: MetalTexture created successfully"];
             
             // Verify MetalTexture implements FlutterTexture protocol
             if (![mtex_ conformsToProtocol:@protocol(FlutterTexture)]) {
-                NSLog(@"❌ FVP: MetalTexture does not conform to FlutterTexture protocol");
+                [plugin sendErrorToFlutter:@"FVP_PROTOCOL_ERROR" message:@"MetalTexture does not conform to FlutterTexture protocol" additionalData:@{
+                    @"handle": @(handle),
+                    @"width": @(width),
+                    @"height": @(height)
+                }];
                 throw std::runtime_error("MetalTexture does not conform to FlutterTexture protocol");
             }
-            NSLog(@"✅ FVP: MetalTexture conforms to FlutterTexture protocol");
+            [plugin sendLogToFlutter:@"✅ FVP: MetalTexture conforms to FlutterTexture protocol"];
             
             // Test the copyPixelBuffer method before registration
-            NSLog(@"🔧 FVP: Testing copyPixelBuffer method");
+            [plugin sendLogToFlutter:@"🔧 FVP: Testing copyPixelBuffer method"];
             CVPixelBufferRef testBuffer = [mtex_ copyPixelBuffer];
             if (testBuffer) {
-                NSLog(@"✅ FVP: copyPixelBuffer test successful");
+                [plugin sendLogToFlutter:@"✅ FVP: copyPixelBuffer test successful"];
                 CVPixelBufferRelease(testBuffer);
             } else {
-                NSLog(@"❌ FVP: copyPixelBuffer test failed - this will cause registration to fail");
+                [plugin sendErrorToFlutter:@"FVP_COPY_PIXEL_BUFFER_FAILED" message:@"copyPixelBuffer test failed - this will cause registration to fail" additionalData:@{
+                    @"handle": @(handle),
+                    @"width": @(width),
+                    @"height": @(height)
+                }];
             }
             
             // Register texture with error checking
-            NSLog(@"🔧 FVP: About to register texture with registry");
+            [plugin sendLogToFlutter:@"🔧 FVP: About to register texture with registry"];
             if (!texReg) {
-                NSLog(@"❌ FVP: Texture registry is nil");
+                [plugin sendErrorToFlutter:@"FVP_REGISTRY_NIL" message:@"Texture registry is nil" additionalData:@{
+                    @"handle": @(handle),
+                    @"width": @(width),
+                    @"height": @(height)
+                }];
                 throw std::runtime_error("Texture registry is nil");
             }
-            NSLog(@"✅ FVP: Texture registry is valid");
+            [plugin sendLogToFlutter:@"✅ FVP: Texture registry is valid"];
             texId_ = [texReg registerTexture:mtex_];
-            NSLog(@"🔧 FVP: Texture registration returned ID: %lld", texId_);
+            [plugin sendLogToFlutter:[NSString stringWithFormat:@"🔧 FVP: Texture registration returned ID: %lld", texId_]];
             if (texId_ == 0) {
-                NSLog(@"❌ FVP: Failed to register texture - registry returned 0");
-                NSLog(@"❌ FVP: MetalTexture state - device: %@, cmdQueue: %@, texture: %@, pixbuf: %@, fltex: %@", 
-                      mtex_->device ? @"YES" : @"NO",
-                      mtex_->cmdQueue ? @"YES" : @"NO", 
-                      mtex_->texture ? @"YES" : @"NO",
-                      mtex_->pixbuf ? @"YES" : @"NO",
-                      mtex_->fltex ? @"YES" : @"NO");
+                [plugin sendErrorToFlutter:@"FVP_TEXTURE_REGISTRATION_FAILED" message:@"Failed to register texture - registry returned 0" additionalData:@{
+                    @"handle": @(handle),
+                    @"width": @(width),
+                    @"height": @(height),
+                    @"device": mtex_->device ? @"YES" : @"NO",
+                    @"cmdQueue": mtex_->cmdQueue ? @"YES" : @"NO",
+                    @"texture": mtex_->texture ? @"YES" : @"NO",
+                    @"pixbuf": mtex_->pixbuf ? @"YES" : @"NO",
+                    @"fltex": mtex_->fltex ? @"YES" : @"NO"
+                }];
                 throw std::runtime_error("Failed to register texture");
             }
-            NSLog(@"✅ FVP: Texture registered with ID: %lld", texId_);
+            [plugin sendLogToFlutter:[NSString stringWithFormat:@"✅ FVP: Texture registered with ID: %lld", texId_]];
             
             plugin_ = plugin;
             
@@ -262,7 +260,7 @@ public:
             ra.texture = (__bridge void*)mtex_->texture;
             setRenderAPI(&ra);
             setVideoSurfaceSize(width, height);
-            NSLog(@"✅ FVP: Metal render API configured");
+            [plugin sendLogToFlutter:@"✅ FVP: Metal render API configured"];
 
             // Set up render callback
             setRenderCallback([this, texReg](void* opaque) {
@@ -271,10 +269,15 @@ public:
                 [texReg textureFrameAvailable:texId_];
                 syncFrameToPip();
             });
-            NSLog(@"✅ FVP: Render callback set");
+            [plugin sendLogToFlutter:@"✅ FVP: Render callback set"];
             
         } catch (const std::exception& e) {
-            NSLog(@"❌ FVP: TexturePlayer constructor failed: %s", e.what());
+            [plugin sendErrorToFlutter:@"FVP_TEXTURE_PLAYER_CRASH" message:[NSString stringWithFormat:@"TexturePlayer constructor failed: %s", e.what()] additionalData:@{
+                @"handle": @(handle),
+                @"width": @(width),
+                @"height": @(height),
+                @"exception": [NSString stringWithUTF8String:e.what()]
+            }];
             throw;
         }
     }
