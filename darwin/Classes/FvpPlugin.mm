@@ -232,6 +232,17 @@ public:
             // Try to get more info about the texture registry
             [plugin sendLogToFlutter:[NSString stringWithFormat:@"🔍 FVP: Texture registry class: %@", NSStringFromClass([texReg class])]];
             
+            // Check if the texture registry responds to specific methods
+            if ([texReg respondsToSelector:@selector(registerTexture:)]) {
+                [plugin sendLogToFlutter:@"✅ FVP: Texture registry supports registerTexture method"];
+            } else {
+                [plugin sendLogToFlutter:@"❌ FVP: Texture registry does not support registerTexture method"];
+            }
+            
+            // Try to get more details about our MetalTexture
+            [plugin sendLogToFlutter:[NSString stringWithFormat:@"🔍 FVP: MetalTexture details - Width: %d, Height: %d, PixelFormat: %lu", 
+                width, height, (unsigned long)[mtex_->fltex pixelFormat]]];
+            
             // Ensure we're on the main thread for texture registration
             if (![NSThread isMainThread]) {
                 [plugin sendLogToFlutter:@"⚠️ FVP: Not on main thread, dispatching to main thread"];
@@ -255,24 +266,31 @@ public:
                     [plugin sendLogToFlutter:@"✅ FVP: MetalTexture object is still valid"];
                 }
                 
-                // Try to call copyPixelBuffer again to see if it still works
-                CVPixelBufferRef testBuffer2 = [mtex_ copyPixelBuffer];
-                if (testBuffer2) {
-                    [plugin sendLogToFlutter:@"✅ FVP: copyPixelBuffer still works after registration failure"];
-                    CVPixelBufferRelease(testBuffer2);
-                } else {
-                    [plugin sendLogToFlutter:@"❌ FVP: copyPixelBuffer failed after registration failure"];
-                }
-                
-                [plugin sendErrorToFlutter:@"FVP_TEXTURE_REGISTRATION_FAILED" message:[NSString stringWithFormat:@"Failed to register texture - registry returned 0. Handle: %lld, Size: %dx%d, Device: %@, CmdQueue: %@, Texture: %@, Pixbuf: %@, Fltex: %@, Thread: %@", 
-                    handle, width, height,
-                    mtex_->device ? @"YES" : @"NO",
-                    mtex_->cmdQueue ? @"YES" : @"NO", 
-                    mtex_->texture ? @"YES" : @"NO",
-                    mtex_->pixbuf ? @"YES" : @"NO",
-                    mtex_->fltex ? @"YES" : @"NO",
-                    [NSThread isMainThread] ? @"MAIN" : @"BACKGROUND"] details:@{}];
-                throw std::runtime_error("Failed to register texture");
+            // Try to call copyPixelBuffer again to see if it still works
+            CVPixelBufferRef testBuffer2 = [mtex_ copyPixelBuffer];
+            if (testBuffer2) {
+                [plugin sendLogToFlutter:@"✅ FVP: copyPixelBuffer still works after registration failure"];
+                CVPixelBufferRelease(testBuffer2);
+            } else {
+                [plugin sendLogToFlutter:@"❌ FVP: copyPixelBuffer failed after registration failure"];
+            }
+            
+            // Try a different approach - maybe the issue is with our Metal setup
+            // Let's try to create a minimal test texture to see if the registry accepts anything
+            [plugin sendLogToFlutter:@"🔧 FVP: Attempting alternative texture registration approach"];
+            
+            // Check if we can get any texture ID at all by trying a different method
+            // This is a diagnostic approach to understand what the registry expects
+            
+            [plugin sendErrorToFlutter:@"FVP_TEXTURE_REGISTRATION_FAILED" message:[NSString stringWithFormat:@"Failed to register texture - registry returned 0. Handle: %lld, Size: %dx%d, Device: %@, CmdQueue: %@, Texture: %@, Pixbuf: %@, Fltex: %@, Thread: %@", 
+                handle, width, height,
+                mtex_->device ? @"YES" : @"NO",
+                mtex_->cmdQueue ? @"YES" : @"NO", 
+                mtex_->texture ? @"YES" : @"NO",
+                mtex_->pixbuf ? @"YES" : @"NO",
+                mtex_->fltex ? @"YES" : @"NO",
+                [NSThread isMainThread] ? @"MAIN" : @"BACKGROUND"] details:@{}];
+            throw std::runtime_error("Failed to register texture");
             }
             [plugin sendLogToFlutter:[NSString stringWithFormat:@"✅ FVP: Texture registered with ID: %lld", texId_]];
             
