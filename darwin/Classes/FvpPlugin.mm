@@ -124,6 +124,7 @@ using namespace std;
 }
 
 - (void)dealloc {
+    [plugin sendLogToFlutter:[NSString stringWithFormat@"❌ MetalTexture deallocated before registration!"]];
     CVPixelBufferRelease(pixbuf);
     if (texCache) CFRelease(texCache);
 }
@@ -146,12 +147,12 @@ using namespace std;
     }
     
     @try {
-        auto cmdbuf = [cmdQueue commandBuffer];
+    auto cmdbuf = [cmdQueue commandBuffer];
         if (!cmdbuf) {
             return nil;
         }
         
-        auto blit = [cmdbuf blitCommandEncoder];
+    auto blit = [cmdbuf blitCommandEncoder];
         if (!blit) {
             return nil;
         }
@@ -167,10 +168,10 @@ using namespace std;
               destinationLevel:0 
             destinationOrigin:MTLOriginMake(0, 0, 0)];
         
-        [blit endEncoding];
-        [cmdbuf commit];
+    [blit endEncoding];
+    [cmdbuf commit];
         
-        return CVPixelBufferRetain(pixbuf);
+    return CVPixelBufferRetain(pixbuf);
         
     } @catch (NSException *exception) {
         return nil;
@@ -179,6 +180,9 @@ using namespace std;
 @end
 
 class TexturePlayer final: public Player {
+private:
+    MetalTexture* __strong mtex_;  // Use __strong to ensure ARC retention
+    
 public:
     TexturePlayer(int64_t handle, int width, int height, NSObject<FlutterTextureRegistry>* texReg, FvpPlugin* plugin)
         : Player(reinterpret_cast<mdkPlayerAPI*>(handle)) {
@@ -189,6 +193,7 @@ public:
             [plugin sendLogToFlutter:[NSString stringWithFormat:@"🔧 FVP: Creating MetalTexture with size %dx%d", width, height]];
             [plugin sendLogToFlutter:[NSString stringWithFormat:@"🔧 FVP: Current thread: %@", [NSThread isMainThread] ? @"MAIN" : @"BACKGROUND"]];
             mtex_ = [[MetalTexture alloc] initWithWidth:width height:height];
+            [plugin sendLogToFlutter:[NSString stringWithFormat:@"🔧 FVP: MetalTexture allocated with ARC retention - object: %p", mtex_]];
             if (!mtex_) {
                 [plugin sendErrorToFlutter:@"FVP_METAL_TEXTURE_FAILED" message:[NSString stringWithFormat:@"Failed to create MetalTexture - alloc returned nil. Handle: %lld, Size: %dx%d", handle, width, height] details:@{}];
                 throw std::runtime_error("Failed to create MetalTexture");
@@ -247,10 +252,12 @@ public:
             if (![NSThread isMainThread]) {
                 [plugin sendLogToFlutter:@"⚠️ FVP: Not on main thread, dispatching to main thread"];
                 dispatch_sync(dispatch_get_main_queue(), ^{
+                    [plugin sendLogToFlutter:[NSString stringWithFormat:@"🔧 FVP: About to register texture - object still valid: %p", mtex_]];
                     texId_ = [texReg registerTexture:mtex_];
                 });
             } else {
                 [plugin sendLogToFlutter:@"✅ FVP: On main thread, registering texture"];
+                [plugin sendLogToFlutter:[NSString stringWithFormat:@"🔧 FVP: About to register texture - object still valid: %p", mtex_]];
                 texId_ = [texReg registerTexture:mtex_];
             }
             
@@ -290,7 +297,7 @@ public:
                 mtex_->pixbuf ? @"YES" : @"NO",
                 mtex_->fltex ? @"YES" : @"NO",
                 [NSThread isMainThread] ? @"MAIN" : @"BACKGROUND"] details:@{}];
-            throw std::runtime_error("Failed to register texture");
+                throw std::runtime_error("Failed to register texture");
             }
             [plugin sendLogToFlutter:[NSString stringWithFormat:@"✅ FVP: Texture registered with ID: %lld", texId_]];
             
@@ -391,7 +398,6 @@ public:
 
 private:
     int64_t texId_ = 0;
-    MetalTexture* mtex_ = nil;
     __weak FvpPlugin* plugin_;
 };
 
@@ -452,9 +458,9 @@ private:
         result(@(supported));
         return;
     } else if ([call.method isEqualToString:@"CreateRT"]) {
-        const auto handle = ((NSNumber*)call.arguments[@"player"]).longLongValue;
-        const auto width = ((NSNumber*)call.arguments[@"width"]).intValue;
-        const auto height = ((NSNumber*)call.arguments[@"height"]).intValue;
+            const auto handle = ((NSNumber*)call.arguments[@"player"]).longLongValue;
+            const auto width = ((NSNumber*)call.arguments[@"width"]).intValue;
+            const auto height = ((NSNumber*)call.arguments[@"height"]).intValue;
         if (width <= 0 || height <= 0) {
             [self sendLogToFlutter:@"❌ CreateRT: Invalid dimensions"];
             [self sendErrorToFlutter:@"CreateRTError" message:@"Invalid width or height" details:@{@"width": @(width), @"height": @(height)}];
@@ -475,7 +481,7 @@ private:
                 }
                 
                 [self sendLogToFlutter:[NSString stringWithFormat:@"✅ CreateRT: TexturePlayer created with textureId: %lld", player->textureId()]];
-                players[player->textureId()] = player;
+            players[player->textureId()] = player;
                 result(@(player->textureId()));
                 
             } catch (const std::exception& e) {
