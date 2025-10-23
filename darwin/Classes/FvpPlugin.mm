@@ -203,28 +203,80 @@ class TexturePlayer final: public Player {
 public:
     TexturePlayer(int64_t handle, int width, int height, NSObject<FlutterTextureRegistry>* texReg, FvpPlugin* plugin)
         : Player(reinterpret_cast<mdkPlayerAPI*>(handle)) {
-        mtex_ = [[MetalTexture alloc] initWithWidth:width height:height];
-        if (!mtex_) {
-            throw std::runtime_error("Failed to create MetalTexture");
-        }
-        texId_ = [texReg registerTexture:mtex_];
-        if (texId_ == -1) {
-            throw std::runtime_error("Failed to register texture");
-        }
-        plugin_ = plugin;
-        MetalRenderAPI ra{};
-        ra.device = (__bridge void*)mtex_->device;
-        ra.cmdQueue = (__bridge void*)mtex_->cmdQueue;
-        ra.texture = (__bridge void*)mtex_->texture;
-        setRenderAPI(&ra);
-        setVideoSurfaceSize(width, height);
+        try {
+            NSLog(@"🔧 FVP: TexturePlayer constructor - handle: %lld, size: %dx%d", handle, width, height);
+            
+            // Create MetalTexture with error checking
+            NSLog(@"🔧 FVP: Creating MetalTexture with size %dx%d", width, height);
+            mtex_ = [[MetalTexture alloc] initWithWidth:width height:height];
+            if (!mtex_) {
+                NSLog(@"❌ FVP: Failed to create MetalTexture - alloc returned nil");
+                throw std::runtime_error("Failed to create MetalTexture");
+            }
+            NSLog(@"✅ FVP: MetalTexture created successfully");
+            
+            // Verify MetalTexture implements FlutterTexture protocol
+            if (![mtex_ conformsToProtocol:@protocol(FlutterTexture)]) {
+                NSLog(@"❌ FVP: MetalTexture does not conform to FlutterTexture protocol");
+                throw std::runtime_error("MetalTexture does not conform to FlutterTexture protocol");
+            }
+            NSLog(@"✅ FVP: MetalTexture conforms to FlutterTexture protocol");
+            
+            // Test the copyPixelBuffer method before registration
+            NSLog(@"🔧 FVP: Testing copyPixelBuffer method");
+            CVPixelBufferRef testBuffer = [mtex_ copyPixelBuffer];
+            if (testBuffer) {
+                NSLog(@"✅ FVP: copyPixelBuffer test successful");
+                CVPixelBufferRelease(testBuffer);
+            } else {
+                NSLog(@"❌ FVP: copyPixelBuffer test failed - this will cause registration to fail");
+            }
+            
+            // Register texture with error checking
+            NSLog(@"🔧 FVP: About to register texture with registry");
+            if (!texReg) {
+                NSLog(@"❌ FVP: Texture registry is nil");
+                throw std::runtime_error("Texture registry is nil");
+            }
+            NSLog(@"✅ FVP: Texture registry is valid");
+            texId_ = [texReg registerTexture:mtex_];
+            NSLog(@"🔧 FVP: Texture registration returned ID: %lld", texId_);
+            if (texId_ == 0) {
+                NSLog(@"❌ FVP: Failed to register texture - registry returned 0");
+                NSLog(@"❌ FVP: MetalTexture state - device: %@, cmdQueue: %@, texture: %@, pixbuf: %@, fltex: %@", 
+                      mtex_->device ? @"YES" : @"NO",
+                      mtex_->cmdQueue ? @"YES" : @"NO", 
+                      mtex_->texture ? @"YES" : @"NO",
+                      mtex_->pixbuf ? @"YES" : @"NO",
+                      mtex_->fltex ? @"YES" : @"NO");
+                throw std::runtime_error("Failed to register texture");
+            }
+            NSLog(@"✅ FVP: Texture registered with ID: %lld", texId_);
+            
+            plugin_ = plugin;
+            
+            // Set up Metal render API
+            MetalRenderAPI ra{};
+            ra.device = (__bridge void*)mtex_->device;
+            ra.cmdQueue = (__bridge void*)mtex_->cmdQueue;
+            ra.texture = (__bridge void*)mtex_->texture;
+            setRenderAPI(&ra);
+            setVideoSurfaceSize(width, height);
+            NSLog(@"✅ FVP: Metal render API configured");
 
-        setRenderCallback([this, texReg](void* opaque) {
-            scoped_lock lock(mtex_->mtx);
-            renderVideo();
-            [texReg textureFrameAvailable:texId_];
-            syncFrameToPip();
-        });
+            // Set up render callback
+            setRenderCallback([this, texReg](void* opaque) {
+                scoped_lock lock(mtex_->mtx);
+                renderVideo();
+                [texReg textureFrameAvailable:texId_];
+                syncFrameToPip();
+            });
+            NSLog(@"✅ FVP: Render callback set");
+            
+        } catch (const std::exception& e) {
+            NSLog(@"❌ FVP: TexturePlayer constructor failed: %s", e.what());
+            throw;
+        }
     }
 
     ~TexturePlayer() override {
@@ -370,13 +422,34 @@ private:
         }
         @try {
             [self sendLogToFlutter:[NSString stringWithFormat:@"🔧 CreateRT: Starting - handle: %lld, size: %dx%d", handle, width, height]];
-            auto player = make_shared<TexturePlayer>(handle, width, height, _texRegistry, self);
-            [self sendLogToFlutter:[NSString stringWithFormat:@"✅ CreateRT: Created TexturePlayer with textureId: %lld", player->textureId()]];
-            players[player->textureId()] = player;
-            result(@(player->textureId()));
+            
+            // Use C++ try-catch for C++ exceptions
+            try {
+                auto player = make_shared<TexturePlayer>(handle, width, height, _texRegistry, self);
+                if (!player) {
+                    [self sendLogToFlutter:@"❌ CreateRT: Failed to create TexturePlayer"];
+                    [self sendErrorToFlutter:@"CreateRTError" message:@"Failed to create TexturePlayer" details:nil];
+                    result([FlutterError errorWithCode:@"PLAYER_CREATION_FAILED" message:@"Failed to create player" details:nil]);
+                    return;
+                }
+                
+                [self sendLogToFlutter:[NSString stringWithFormat:@"✅ CreateRT: TexturePlayer created with textureId: %lld", player->textureId()]];
+                players[player->textureId()] = player;
+                result(@(player->textureId()));
+                
+            } catch (const std::exception& e) {
+                [self sendLogToFlutter:[NSString stringWithFormat:@"❌ CreateRT: C++ Exception: %s", e.what()]];
+                [self sendErrorToFlutter:@"CreateRTError" message:[NSString stringWithFormat:@"C++ Exception in CreateRT: %s", e.what()] details:nil];
+                result([FlutterError errorWithCode:@"CREATE_RT_CPP_EXCEPTION" message:[NSString stringWithFormat:@"C++ Exception: %s", e.what()] details:nil]);
+            } catch (...) {
+                [self sendLogToFlutter:@"❌ CreateRT: Unknown C++ exception"];
+                [self sendErrorToFlutter:@"CreateRTError" message:@"Unknown C++ exception in CreateRT" details:nil];
+                result([FlutterError errorWithCode:@"CREATE_RT_UNKNOWN_EXCEPTION" message:@"Unknown C++ exception" details:nil]);
+            }
+            
         } @catch (NSException *exception) {
-            [self sendLogToFlutter:[NSString stringWithFormat:@"❌ CreateRT: Exception: %@", exception.reason]];
-            [self sendErrorToFlutter:@"CreateRTError" message:[NSString stringWithFormat:@"Exception in CreateRT: %@", exception.reason] details:@{@"name": exception.name}];
+            [self sendLogToFlutter:[NSString stringWithFormat:@"❌ CreateRT: NSException: %@", exception.reason]];
+            [self sendErrorToFlutter:@"CreateRTError" message:[NSString stringWithFormat:@"NSException in CreateRT: %@", exception.reason] details:@{@"name": exception.name}];
             result([FlutterError errorWithCode:@"CREATE_RT_EXCEPTION" message:exception.reason details:nil]);
         }
     } else if ([call.method isEqualToString:@"ReleaseRT"]) {
