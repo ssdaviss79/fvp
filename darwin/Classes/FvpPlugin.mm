@@ -195,6 +195,15 @@ public:
             }
             [plugin sendLogToFlutter:@"✅ FVP: MetalTexture created successfully"];
             
+            // Debug Metal objects
+            [plugin sendLogToFlutter:[NSString stringWithFormat:@"🔍 FVP: Metal objects - Device: %@, CmdQueue: %@, Texture: %@, Pixbuf: %@, Fltex: %@, TexCache: %@", 
+                mtex_->device ? @"YES" : @"NO",
+                mtex_->cmdQueue ? @"YES" : @"NO",
+                mtex_->texture ? @"YES" : @"NO", 
+                mtex_->pixbuf ? @"YES" : @"NO",
+                mtex_->fltex ? @"YES" : @"NO",
+                mtex_->texCache ? @"YES" : @"NO"]];
+            
             // Verify MetalTexture implements FlutterTexture protocol
             if (![mtex_ conformsToProtocol:@protocol(FlutterTexture)]) {
                 [plugin sendErrorToFlutter:@"FVP_PROTOCOL_ERROR" message:[NSString stringWithFormat:@"MetalTexture does not conform to FlutterTexture protocol. Handle: %lld, Size: %dx%d", handle, width, height] details:@{}];
@@ -220,6 +229,9 @@ public:
             }
             [plugin sendLogToFlutter:@"✅ FVP: Texture registry is valid"];
             
+            // Try to get more info about the texture registry
+            [plugin sendLogToFlutter:[NSString stringWithFormat:@"🔍 FVP: Texture registry class: %@", NSStringFromClass([texReg class])]];
+            
             // Ensure we're on the main thread for texture registration
             if (![NSThread isMainThread]) {
                 [plugin sendLogToFlutter:@"⚠️ FVP: Not on main thread, dispatching to main thread"];
@@ -233,6 +245,25 @@ public:
             
             [plugin sendLogToFlutter:[NSString stringWithFormat:@"🔧 FVP: Texture registration returned ID: %lld", texId_]];
             if (texId_ == 0) {
+                // Try to get more information about why registration failed
+                [plugin sendLogToFlutter:@"🔍 FVP: Investigating texture registration failure"];
+                
+                // Check if the texture object is still valid
+                if (!mtex_) {
+                    [plugin sendErrorToFlutter:@"FVP_TEXTURE_NIL" message:@"MetalTexture became nil before registration" details:@{}];
+                } else {
+                    [plugin sendLogToFlutter:@"✅ FVP: MetalTexture object is still valid"];
+                }
+                
+                // Try to call copyPixelBuffer again to see if it still works
+                CVPixelBufferRef testBuffer2 = [mtex_ copyPixelBuffer];
+                if (testBuffer2) {
+                    [plugin sendLogToFlutter:@"✅ FVP: copyPixelBuffer still works after registration failure"];
+                    CVPixelBufferRelease(testBuffer2);
+                } else {
+                    [plugin sendLogToFlutter:@"❌ FVP: copyPixelBuffer failed after registration failure"];
+                }
+                
                 [plugin sendErrorToFlutter:@"FVP_TEXTURE_REGISTRATION_FAILED" message:[NSString stringWithFormat:@"Failed to register texture - registry returned 0. Handle: %lld, Size: %dx%d, Device: %@, CmdQueue: %@, Texture: %@, Pixbuf: %@, Fltex: %@, Thread: %@", 
                     handle, width, height,
                     mtex_->device ? @"YES" : @"NO",
