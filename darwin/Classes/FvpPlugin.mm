@@ -189,22 +189,14 @@ public:
             [plugin sendLogToFlutter:[NSString stringWithFormat:@"🔧 FVP: Creating MetalTexture with size %dx%d", width, height]];
             mtex_ = [[MetalTexture alloc] initWithWidth:width height:height];
             if (!mtex_) {
-                [plugin sendErrorToFlutter:@"FVP_METAL_TEXTURE_FAILED" message:@"Failed to create MetalTexture - alloc returned nil" additionalData:@{
-                    @"handle": @(handle),
-                    @"width": @(width),
-                    @"height": @(height)
-                }];
+                [plugin sendErrorToFlutter:@"FVP_METAL_TEXTURE_FAILED" message:[NSString stringWithFormat:@"Failed to create MetalTexture - alloc returned nil. Handle: %lld, Size: %dx%d", handle, width, height]];
                 throw std::runtime_error("Failed to create MetalTexture");
             }
             [plugin sendLogToFlutter:@"✅ FVP: MetalTexture created successfully"];
             
             // Verify MetalTexture implements FlutterTexture protocol
             if (![mtex_ conformsToProtocol:@protocol(FlutterTexture)]) {
-                [plugin sendErrorToFlutter:@"FVP_PROTOCOL_ERROR" message:@"MetalTexture does not conform to FlutterTexture protocol" additionalData:@{
-                    @"handle": @(handle),
-                    @"width": @(width),
-                    @"height": @(height)
-                }];
+                [plugin sendErrorToFlutter:@"FVP_PROTOCOL_ERROR" message:[NSString stringWithFormat:@"MetalTexture does not conform to FlutterTexture protocol. Handle: %lld, Size: %dx%d", handle, width, height]];
                 throw std::runtime_error("MetalTexture does not conform to FlutterTexture protocol");
             }
             [plugin sendLogToFlutter:@"✅ FVP: MetalTexture conforms to FlutterTexture protocol"];
@@ -216,37 +208,26 @@ public:
                 [plugin sendLogToFlutter:@"✅ FVP: copyPixelBuffer test successful"];
                 CVPixelBufferRelease(testBuffer);
             } else {
-                [plugin sendErrorToFlutter:@"FVP_COPY_PIXEL_BUFFER_FAILED" message:@"copyPixelBuffer test failed - this will cause registration to fail" additionalData:@{
-                    @"handle": @(handle),
-                    @"width": @(width),
-                    @"height": @(height)
-                }];
+                [plugin sendErrorToFlutter:@"FVP_COPY_PIXEL_BUFFER_FAILED" message:[NSString stringWithFormat:@"copyPixelBuffer test failed - this will cause registration to fail. Handle: %lld, Size: %dx%d", handle, width, height]];
             }
             
             // Register texture with error checking
             [plugin sendLogToFlutter:@"🔧 FVP: About to register texture with registry"];
             if (!texReg) {
-                [plugin sendErrorToFlutter:@"FVP_REGISTRY_NIL" message:@"Texture registry is nil" additionalData:@{
-                    @"handle": @(handle),
-                    @"width": @(width),
-                    @"height": @(height)
-                }];
+                [plugin sendErrorToFlutter:@"FVP_REGISTRY_NIL" message:[NSString stringWithFormat:@"Texture registry is nil. Handle: %lld, Size: %dx%d", handle, width, height]];
                 throw std::runtime_error("Texture registry is nil");
             }
             [plugin sendLogToFlutter:@"✅ FVP: Texture registry is valid"];
             texId_ = [texReg registerTexture:mtex_];
             [plugin sendLogToFlutter:[NSString stringWithFormat:@"🔧 FVP: Texture registration returned ID: %lld", texId_]];
             if (texId_ == 0) {
-                [plugin sendErrorToFlutter:@"FVP_TEXTURE_REGISTRATION_FAILED" message:@"Failed to register texture - registry returned 0" additionalData:@{
-                    @"handle": @(handle),
-                    @"width": @(width),
-                    @"height": @(height),
-                    @"device": mtex_->device ? @"YES" : @"NO",
-                    @"cmdQueue": mtex_->cmdQueue ? @"YES" : @"NO",
-                    @"texture": mtex_->texture ? @"YES" : @"NO",
-                    @"pixbuf": mtex_->pixbuf ? @"YES" : @"NO",
-                    @"fltex": mtex_->fltex ? @"YES" : @"NO"
-                }];
+                [plugin sendErrorToFlutter:@"FVP_TEXTURE_REGISTRATION_FAILED" message:[NSString stringWithFormat:@"Failed to register texture - registry returned 0. Handle: %lld, Size: %dx%d, Device: %@, CmdQueue: %@, Texture: %@, Pixbuf: %@, Fltex: %@", 
+                    handle, width, height,
+                    mtex_->device ? @"YES" : @"NO",
+                    mtex_->cmdQueue ? @"YES" : @"NO", 
+                    mtex_->texture ? @"YES" : @"NO",
+                    mtex_->pixbuf ? @"YES" : @"NO",
+                    mtex_->fltex ? @"YES" : @"NO"]];
                 throw std::runtime_error("Failed to register texture");
             }
             [plugin sendLogToFlutter:[NSString stringWithFormat:@"✅ FVP: Texture registered with ID: %lld", texId_]];
@@ -272,12 +253,7 @@ public:
             [plugin sendLogToFlutter:@"✅ FVP: Render callback set"];
             
         } catch (const std::exception& e) {
-            [plugin sendErrorToFlutter:@"FVP_TEXTURE_PLAYER_CRASH" message:[NSString stringWithFormat:@"TexturePlayer constructor failed: %s", e.what()] additionalData:@{
-                @"handle": @(handle),
-                @"width": @(width),
-                @"height": @(height),
-                @"exception": [NSString stringWithUTF8String:e.what()]
-            }];
+            [plugin sendErrorToFlutter:@"FVP_TEXTURE_PLAYER_CRASH" message:[NSString stringWithFormat:@"TexturePlayer constructor failed: %s. Handle: %lld, Size: %dx%d", e.what(), handle, width, height]];
             throw;
         }
     }
