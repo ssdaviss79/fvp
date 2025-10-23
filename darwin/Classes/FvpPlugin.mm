@@ -59,30 +59,82 @@ using namespace std;
 
 - (instancetype)initWithWidth:(int)width height:(int)height {
     self = [super init];
-    device = MTLCreateSystemDefaultDevice();
-    cmdQueue = [device newCommandQueue];
-    auto td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:width height:height mipmapped:NO];
-    td.usage = MTLTextureUsageRenderTarget;
-    texture = [device newTextureWithDescriptor:td];
-    auto attr = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFDictionarySetValue(attr, kCVPixelBufferMetalCompatibilityKey, kCFBooleanTrue);
-    auto iosurface_props = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    CFDictionarySetValue(attr, kCVPixelBufferIOSurfacePropertiesKey, iosurface_props);
-    CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, attr, &pixbuf);
-    CFRelease(attr);
-    texCache = {};
-#if (USE_TEXCACHE + 0)
-    CVMetalTextureCacheCreate(nullptr, nullptr, device, nullptr, &texCache);
-    CVMetalTextureRef cvtex;
-    CVMetalTextureCacheCreateTextureFromImage(nil, texCache, pixbuf, nil, MTLPixelFormatBGRA8Unorm, width, height, 0, &cvtex);
-    fltex = CVMetalTextureGetTexture(cvtex);
-    CFRelease(cvtex);
-#else
-    auto iosurface = CVPixelBufferGetIOSurface(pixbuf);
-    td.usage = MTLTextureUsageShaderRead;
-    fltex = [device newTextureWithDescriptor:td iosurface:iosurface plane:0];
-#endif
-    return self;
+    
+    @try {
+        NSLog(@"🔧 FVP: MetalTexture initWithWidth:%d height:%d", width, height);
+        
+        // Check Metal device creation
+        device = MTLCreateSystemDefaultDevice();
+        if (!device) {
+            NSLog(@"❌ FVP: Failed to create Metal device");
+            return nil;
+        }
+        NSLog(@"✅ FVP: Metal device created successfully");
+        
+        // Check command queue creation
+        cmdQueue = [device newCommandQueue];
+        if (!cmdQueue) {
+            NSLog(@"❌ FVP: Failed to create command queue");
+            return nil;
+        }
+        NSLog(@"✅ FVP: Command queue created successfully");
+        
+        // Create render texture
+        auto td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:width height:height mipmapped:NO];
+        td.usage = MTLTextureUsageRenderTarget;
+        texture = [device newTextureWithDescriptor:td];
+        if (!texture) {
+            NSLog(@"❌ FVP: Failed to create Metal texture");
+            return nil;
+        }
+        NSLog(@"✅ FVP: Metal texture created successfully");
+        
+        // Create pixel buffer with proper attributes
+        auto attr = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        CFDictionarySetValue(attr, kCVPixelBufferMetalCompatibilityKey, kCFBooleanTrue);
+        auto iosurface_props = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        CFDictionarySetValue(attr, kCVPixelBufferIOSurfacePropertiesKey, iosurface_props);
+        
+        CVReturn result = CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, attr, &pixbuf);
+        CFRelease(attr);
+        
+        if (result != kCVReturnSuccess || !pixbuf) {
+            NSLog(@"❌ FVP: Failed to create pixel buffer, CVReturn: %d", result);
+            return nil;
+        }
+        NSLog(@"✅ FVP: Pixel buffer created successfully");
+        
+        // Use iOS-compatible CVMetalTextureCache approach (always use this on iOS)
+        CVMetalTextureCacheCreate(nullptr, nullptr, device, nullptr, &texCache);
+        if (!texCache) {
+            NSLog(@"❌ FVP: Failed to create Metal texture cache");
+            return nil;
+        }
+        NSLog(@"✅ FVP: Metal texture cache created successfully");
+        
+        CVMetalTextureRef cvtex = nullptr;
+        CVReturn texResult = CVMetalTextureCacheCreateTextureFromImage(nil, texCache, pixbuf, nil, MTLPixelFormatBGRA8Unorm, width, height, 0, &cvtex);
+        if (texResult != kCVReturnSuccess || !cvtex) {
+            NSLog(@"❌ FVP: Failed to create texture from image, CVReturn: %d", texResult);
+            return nil;
+        }
+        
+        fltex = CVMetalTextureGetTexture(cvtex);
+        if (!fltex) {
+            NSLog(@"❌ FVP: Failed to get texture from CVMetalTexture");
+            CFRelease(cvtex);
+            return nil;
+        }
+        NSLog(@"✅ FVP: Flutter texture created successfully");
+        
+        CFRelease(cvtex);
+        NSLog(@"✅ FVP: MetalTexture created successfully");
+        return self;
+        
+    } @catch (NSException *exception) {
+        NSLog(@"❌ FVP: MetalTexture exception: %@", exception.reason);
+        return nil;
+    }
 }
 
 - (void)dealloc {
@@ -92,17 +144,58 @@ using namespace std;
 
 - (CVPixelBufferRef _Nullable)copyPixelBuffer {
     scoped_lock lock(mtx);
-    if (!texture || !fltex || !pixbuf) {
-        NSLog(@"❌ MetalTexture: Invalid texture or pixbuf");
+    
+    // Comprehensive validation
+    if (!texture) {
+        NSLog(@"❌ MetalTexture: No render texture");
         return nil;
     }
-    auto cmdbuf = [cmdQueue commandBuffer];
-    auto blit = [cmdbuf blitCommandEncoder];
-    [blit copyFromTexture:texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(texture.width, texture.height, texture.depth)
-        toTexture:fltex destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
-    [blit endEncoding];
-    [cmdbuf commit];
-    return CVPixelBufferRetain(pixbuf);
+    if (!fltex) {
+        NSLog(@"❌ MetalTexture: No Flutter texture");
+        return nil;
+    }
+    if (!pixbuf) {
+        NSLog(@"❌ MetalTexture: No pixel buffer");
+        return nil;
+    }
+    if (!cmdQueue) {
+        NSLog(@"❌ MetalTexture: No command queue");
+        return nil;
+    }
+    
+    @try {
+        auto cmdbuf = [cmdQueue commandBuffer];
+        if (!cmdbuf) {
+            NSLog(@"❌ MetalTexture: Failed to create command buffer");
+            return nil;
+        }
+        
+        auto blit = [cmdbuf blitCommandEncoder];
+        if (!blit) {
+            NSLog(@"❌ MetalTexture: Failed to create blit command encoder");
+            return nil;
+        }
+        
+        // Perform the texture copy
+        [blit copyFromTexture:texture 
+                   sourceSlice:0 
+                   sourceLevel:0 
+                 sourceOrigin:MTLOriginMake(0, 0, 0) 
+                   sourceSize:MTLSizeMake(texture.width, texture.height, texture.depth)
+                    toTexture:fltex 
+              destinationSlice:0 
+              destinationLevel:0 
+            destinationOrigin:MTLOriginMake(0, 0, 0)];
+        
+        [blit endEncoding];
+        [cmdbuf commit];
+        
+        return CVPixelBufferRetain(pixbuf);
+        
+    } @catch (NSException *exception) {
+        NSLog(@"❌ MetalTexture: Exception in copyPixelBuffer: %@", exception.reason);
+        return nil;
+    }
 }
 @end
 
@@ -110,22 +203,49 @@ class TexturePlayer final: public Player {
 public:
     TexturePlayer(int64_t handle, int width, int height, NSObject<FlutterTextureRegistry>* texReg, FvpPlugin* plugin)
         : Player(reinterpret_cast<mdkPlayerAPI*>(handle)) {
-        mtex_ = [[MetalTexture alloc] initWithWidth:width height:height];
-        texId_ = [texReg registerTexture:mtex_];
-        plugin_ = plugin;
-        MetalRenderAPI ra{};
-        ra.device = (__bridge void*)mtex_->device;
-        ra.cmdQueue = (__bridge void*)mtex_->cmdQueue;
-        ra.texture = (__bridge void*)mtex_->texture;
-        setRenderAPI(&ra);
-        setVideoSurfaceSize(width, height);
+        try {
+            NSLog(@"🔧 FVP: TexturePlayer constructor - handle: %lld, size: %dx%d", handle, width, height);
+            
+            // Create MetalTexture with error checking
+            mtex_ = [[MetalTexture alloc] initWithWidth:width height:height];
+            if (!mtex_) {
+                NSLog(@"❌ FVP: Failed to create MetalTexture");
+                throw std::runtime_error("Failed to create MetalTexture");
+            }
+            NSLog(@"✅ FVP: MetalTexture created successfully");
+            
+            // Register texture with error checking
+            texId_ = [texReg registerTexture:mtex_];
+            if (texId_ == 0) {
+                NSLog(@"❌ FVP: Failed to register texture");
+                throw std::runtime_error("Failed to register texture");
+            }
+            NSLog(@"✅ FVP: Texture registered with ID: %lld", texId_);
+            
+            plugin_ = plugin;
+            
+            // Set up Metal render API
+            MetalRenderAPI ra{};
+            ra.device = (__bridge void*)mtex_->device;
+            ra.cmdQueue = (__bridge void*)mtex_->cmdQueue;
+            ra.texture = (__bridge void*)mtex_->texture;
+            setRenderAPI(&ra);
+            setVideoSurfaceSize(width, height);
+            NSLog(@"✅ FVP: Metal render API configured");
 
-        setRenderCallback([this, texReg](void* opaque) {
-            scoped_lock lock(mtex_->mtx);
-            renderVideo();
-            [texReg textureFrameAvailable:texId_];
-            syncFrameToPip();
-        });
+            // Set up render callback
+            setRenderCallback([this, texReg](void* opaque) {
+                scoped_lock lock(mtex_->mtx);
+                renderVideo();
+                [texReg textureFrameAvailable:texId_];
+                syncFrameToPip();
+            });
+            NSLog(@"✅ FVP: Render callback set");
+            
+        } catch (const std::exception& e) {
+            NSLog(@"❌ FVP: TexturePlayer constructor failed: %s", e.what());
+            throw;
+        }
     }
 
     ~TexturePlayer() override {
@@ -270,18 +390,35 @@ private:
             return;
         }
         @try {
-            auto player = make_shared<TexturePlayer>(handle, width, height, _texRegistry, self);
-            if (!player) {
-                [self sendLogToFlutter:@"❌ CreateRT: Failed to create TexturePlayer"];
-                [self sendErrorToFlutter:@"CreateRTError" message:@"Failed to create TexturePlayer" details:nil];
-                result([FlutterError errorWithCode:@"PLAYER_CREATION_FAILED" message:@"Failed to create player" details:nil]);
-                return;
+            [self sendLogToFlutter:[NSString stringWithFormat:@"🔧 CreateRT: Starting - handle: %lld, size: %dx%d", handle, width, height]];
+            
+            // Use C++ try-catch for C++ exceptions
+            try {
+                auto player = make_shared<TexturePlayer>(handle, width, height, _texRegistry, self);
+                if (!player) {
+                    [self sendLogToFlutter:@"❌ CreateRT: Failed to create TexturePlayer"];
+                    [self sendErrorToFlutter:@"CreateRTError" message:@"Failed to create TexturePlayer" details:nil];
+                    result([FlutterError errorWithCode:@"PLAYER_CREATION_FAILED" message:@"Failed to create player" details:nil]);
+                    return;
+                }
+                
+                [self sendLogToFlutter:[NSString stringWithFormat:@"✅ CreateRT: TexturePlayer created with textureId: %lld", player->textureId()]];
+                players[player->textureId()] = player;
+                result(@(player->textureId()));
+                
+            } catch (const std::exception& e) {
+                [self sendLogToFlutter:[NSString stringWithFormat:@"❌ CreateRT: C++ Exception: %s", e.what()]];
+                [self sendErrorToFlutter:@"CreateRTError" message:[NSString stringWithFormat:@"C++ Exception in CreateRT: %s", e.what()] details:nil];
+                result([FlutterError errorWithCode:@"CREATE_RT_CPP_EXCEPTION" message:[NSString stringWithFormat:@"C++ Exception: %s", e.what()] details:nil]);
+            } catch (...) {
+                [self sendLogToFlutter:@"❌ CreateRT: Unknown C++ exception"];
+                [self sendErrorToFlutter:@"CreateRTError" message:@"Unknown C++ exception in CreateRT" details:nil];
+                result([FlutterError errorWithCode:@"CREATE_RT_UNKNOWN_EXCEPTION" message:@"Unknown C++ exception" details:nil]);
             }
-            players[player->textureId()] = player;
-            result(@(player->textureId()));
+            
         } @catch (NSException *exception) {
-            [self sendLogToFlutter:[NSString stringWithFormat:@"❌ CreateRT: Exception: %@", exception.reason]];
-            [self sendErrorToFlutter:@"CreateRTError" message:[NSString stringWithFormat:@"Exception in CreateRT: %@", exception.reason] details:@{@"name": exception.name}];
+            [self sendLogToFlutter:[NSString stringWithFormat:@"❌ CreateRT: NSException: %@", exception.reason]];
+            [self sendErrorToFlutter:@"CreateRTError" message:[NSString stringWithFormat:@"NSException in CreateRT: %@", exception.reason] details:@{@"name": exception.name}];
             result([FlutterError errorWithCode:@"CREATE_RT_EXCEPTION" message:exception.reason details:nil]);
         }
     } else if ([call.method isEqualToString:@"ReleaseRT"]) {
