@@ -187,6 +187,7 @@ public:
             
             // Create MetalTexture with error checking
             [plugin sendLogToFlutter:[NSString stringWithFormat:@"🔧 FVP: Creating MetalTexture with size %dx%d", width, height]];
+            [plugin sendLogToFlutter:[NSString stringWithFormat:@"🔧 FVP: Current thread: %@", [NSThread isMainThread] ? @"MAIN" : @"BACKGROUND"]];
             mtex_ = [[MetalTexture alloc] initWithWidth:width height:height];
             if (!mtex_) {
                 [plugin sendErrorToFlutter:@"FVP_METAL_TEXTURE_FAILED" message:[NSString stringWithFormat:@"Failed to create MetalTexture - alloc returned nil. Handle: %lld, Size: %dx%d", handle, width, height] details:@{}];
@@ -218,16 +219,28 @@ public:
                 throw std::runtime_error("Texture registry is nil");
             }
             [plugin sendLogToFlutter:@"✅ FVP: Texture registry is valid"];
-            texId_ = [texReg registerTexture:mtex_];
+            
+            // Ensure we're on the main thread for texture registration
+            if (![NSThread isMainThread]) {
+                [plugin sendLogToFlutter:@"⚠️ FVP: Not on main thread, dispatching to main thread"];
+                dispatch_sync(dispatch_get_main_queue(), ^{
+                    texId_ = [texReg registerTexture:mtex_];
+                });
+            } else {
+                [plugin sendLogToFlutter:@"✅ FVP: On main thread, registering texture"];
+                texId_ = [texReg registerTexture:mtex_];
+            }
+            
             [plugin sendLogToFlutter:[NSString stringWithFormat:@"🔧 FVP: Texture registration returned ID: %lld", texId_]];
             if (texId_ == 0) {
-                [plugin sendErrorToFlutter:@"FVP_TEXTURE_REGISTRATION_FAILED" message:[NSString stringWithFormat:@"Failed to register texture - registry returned 0. Handle: %lld, Size: %dx%d, Device: %@, CmdQueue: %@, Texture: %@, Pixbuf: %@, Fltex: %@", 
+                [plugin sendErrorToFlutter:@"FVP_TEXTURE_REGISTRATION_FAILED" message:[NSString stringWithFormat:@"Failed to register texture - registry returned 0. Handle: %lld, Size: %dx%d, Device: %@, CmdQueue: %@, Texture: %@, Pixbuf: %@, Fltex: %@, Thread: %@", 
                     handle, width, height,
                     mtex_->device ? @"YES" : @"NO",
                     mtex_->cmdQueue ? @"YES" : @"NO", 
                     mtex_->texture ? @"YES" : @"NO",
                     mtex_->pixbuf ? @"YES" : @"NO",
-                    mtex_->fltex ? @"YES" : @"NO"] details:@{}];
+                    mtex_->fltex ? @"YES" : @"NO",
+                    [NSThread isMainThread] ? @"MAIN" : @"BACKGROUND"] details:@{}];
                 throw std::runtime_error("Failed to register texture");
             }
             [plugin sendLogToFlutter:[NSString stringWithFormat:@"✅ FVP: Texture registered with ID: %lld", texId_]];
