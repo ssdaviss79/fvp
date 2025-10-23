@@ -392,30 +392,34 @@ private:
         @try {
             [self sendLogToFlutter:[NSString stringWithFormat:@"🔧 CreateRT: Starting - handle: %lld, size: %dx%d", handle, width, height]];
             
-            auto player = make_shared<TexturePlayer>(handle, width, height, _texRegistry, self);
-            if (!player) {
-                [self sendLogToFlutter:@"❌ CreateRT: Failed to create TexturePlayer"];
-                [self sendErrorToFlutter:@"CreateRTError" message:@"Failed to create TexturePlayer" details:nil];
-                result([FlutterError errorWithCode:@"PLAYER_CREATION_FAILED" message:@"Failed to create player" details:nil]);
-                return;
+            // Use C++ try-catch for C++ exceptions
+            try {
+                auto player = make_shared<TexturePlayer>(handle, width, height, _texRegistry, self);
+                if (!player) {
+                    [self sendLogToFlutter:@"❌ CreateRT: Failed to create TexturePlayer"];
+                    [self sendErrorToFlutter:@"CreateRTError" message:@"Failed to create TexturePlayer" details:nil];
+                    result([FlutterError errorWithCode:@"PLAYER_CREATION_FAILED" message:@"Failed to create player" details:nil]);
+                    return;
+                }
+                
+                [self sendLogToFlutter:[NSString stringWithFormat:@"✅ CreateRT: TexturePlayer created with textureId: %lld", player->textureId()]];
+                players[player->textureId()] = player;
+                result(@(player->textureId()));
+                
+            } catch (const std::exception& e) {
+                [self sendLogToFlutter:[NSString stringWithFormat:@"❌ CreateRT: C++ Exception: %s", e.what()]];
+                [self sendErrorToFlutter:@"CreateRTError" message:[NSString stringWithFormat:@"C++ Exception in CreateRT: %s", e.what()] details:nil];
+                result([FlutterError errorWithCode:@"CREATE_RT_CPP_EXCEPTION" message:[NSString stringWithFormat:@"C++ Exception: %s", e.what()] details:nil]);
+            } catch (...) {
+                [self sendLogToFlutter:@"❌ CreateRT: Unknown C++ exception"];
+                [self sendErrorToFlutter:@"CreateRTError" message:@"Unknown C++ exception in CreateRT" details:nil];
+                result([FlutterError errorWithCode:@"CREATE_RT_UNKNOWN_EXCEPTION" message:@"Unknown C++ exception" details:nil]);
             }
-            
-            [self sendLogToFlutter:[NSString stringWithFormat:@"✅ CreateRT: TexturePlayer created with textureId: %lld", player->textureId()]];
-            players[player->textureId()] = player;
-            result(@(player->textureId()));
             
         } @catch (NSException *exception) {
             [self sendLogToFlutter:[NSString stringWithFormat:@"❌ CreateRT: NSException: %@", exception.reason]];
             [self sendErrorToFlutter:@"CreateRTError" message:[NSString stringWithFormat:@"NSException in CreateRT: %@", exception.reason] details:@{@"name": exception.name}];
             result([FlutterError errorWithCode:@"CREATE_RT_EXCEPTION" message:exception.reason details:nil]);
-        } catch (const std::exception& e) {
-            [self sendLogToFlutter:[NSString stringWithFormat:@"❌ CreateRT: C++ Exception: %s", e.what()]];
-            [self sendErrorToFlutter:@"CreateRTError" message:[NSString stringWithFormat:@"C++ Exception in CreateRT: %s", e.what()] details:nil];
-            result([FlutterError errorWithCode:@"CREATE_RT_CPP_EXCEPTION" message:[NSString stringWithFormat:@"C++ Exception: %s", e.what()] details:nil]);
-        } catch (...) {
-            [self sendLogToFlutter:@"❌ CreateRT: Unknown C++ exception"];
-            [self sendErrorToFlutter:@"CreateRTError" message:@"Unknown C++ exception in CreateRT" details:nil];
-            result([FlutterError errorWithCode:@"CREATE_RT_UNKNOWN_EXCEPTION" message:@"Unknown C++ exception" details:nil]);
         }
     } else if ([call.method isEqualToString:@"ReleaseRT"]) {
         const auto texId = ((NSNumber*)call.arguments[@"texture"]).longLongValue;
